@@ -18,7 +18,7 @@ import {
   formatAgo,
   msUntilNextMinute,
 } from '@/lib/time';
-import { haversineMeters, bearingDegrees, compassPoint } from '@/lib/geo';
+import { haversineMeters, bearingDegrees, compassPoint, type LatLng } from '@/lib/geo';
 import {
   updateTracks,
   isStopped,
@@ -45,6 +45,18 @@ import {
 import { readUrlState, toQueryString, writeUrlState } from '@/lib/urlState';
 import { applyWalkPaths, walkLineOf, walkPathKey } from '@/lib/transit/walkPaths';
 import { riddenShape, riddenStopCodes, shapePath, stopOffsets } from '@/lib/transit/routeShape';
+import {
+  APPROACH_RADIUS_M,
+  ARRIVE_RADIUS_M,
+  arrivalRadius,
+  believedPosition,
+  TRUST_M,
+  buildJourney,
+  journeyFraction,
+  shouldAutoAdvance,
+  stepProgress,
+  stopsRemaining,
+} from '@/lib/transit/journey';
 import { useRecentTrips } from '@/store/recentTrips';
 import type { LiveBus } from '@/api/rtl';
 import type { RouteDetailsResponse } from '@/api/rtl';
@@ -755,6 +767,18 @@ describe('url state', () => {
     expect(state).toEqual({ from: 'me', to: 'stop:201', route: '133@201>106' });
   });
 
+  it('carries a journey in progress, so a reload comes back to the same step', () => {
+    expect(readUrlState('?from=me&to=stop:201&step=ride-1&since=720')).toEqual({
+      from: 'me',
+      to: 'stop:201',
+      step: 'ride-1',
+      since: '720',
+    });
+    expect(toQueryString({ to: 'stop:201', step: 'wait-1', since: '720' })).toBe(
+      '?to=stop:201&step=wait-1&since=720',
+    );
+  });
+
   it('writes links a person can read', () => {
     expect(toQueryString({ from: 'me', to: 'stop:201' })).toBe('?from=me&to=stop:201');
     expect(toQueryString({ to: '4.17550,73.50930,Rasfannu' })).toBe(
@@ -985,5 +1009,153 @@ describe('the ridden part of a route', () => {
     expect(riddenStopCodes(codes, 2, 5)).toEqual(codes.slice(2, 6));
     expect(riddenStopCodes(codes, 3, 3)).toEqual([codes[3]]);
     expect(riddenStopCodes(codes, -1, 4)).toEqual([]);
+  });
+});
+
+
+describe('a journey being travelled', () => {
+  const noon = parseClock('12:00')!;
+
+  /** A trip that walks to a stop, rides, and walks off — one of each kind of step. */
+  function trip(): Itinerary {
+    const terminal = stopPlace('103');
+    const from: Place = { name: 'Up the road', lat: terminal.lat + 0.0027, lng: terminal.lng };
+    const results = planJourney(graph, from, stopPlace('114'), { departAt: noon });
+    const found = results.find(
+      (it) => it.legs[0]?.kind === 'walk' && it.legs.some((l) => l.kind === 'bus'),
+    );
+    if (!found) throw new Error('fixture no longer produces a trip that starts on foot');
+    return found;
+  }
+
+  /** A point `meters` due north of `of`. */
+  function north(of: LatLng, meters: number): LatLng {
+    return { lat: of.lat + meters / 110_540, lng: of.lng };
+  }
+
+  it('turns a bus leg into waiting for the bus and then riding it', () => {
+    const steps = buildJourney(trip());
+    const bus = trip().legs.findIndex((l) => l.kind === 'bus');
+
+    expect(steps.map((s) => s.kind)).toContain('wait');
+    expect(steps.filter((s) => s.kind === 'wait')).toHaveLength(1);
+    expect(steps.find((s) => s.id === `wait-${bus}`)?.targetName).toBe(
+      (trip().legs[bus] as BusLeg).boardStop.name,
+    );
+    expect(steps.find((s) => s.id === `ride-${bus}`)?.targetName).toBe(
+      (trip().legs[bus] as BusLeg).alightStop.name,
+    );
+  });
+
+  it('always ends by arriving, and never starts there', () => {
+    const steps = buildJourney(trip());
+    expect(steps[steps.length - 1].id).toBe('arrive');
+    expect(steps.filter((s) => s.kind === 'arrive')).toHaveLength(1);
+    expect(steps.length).toBeGreaterThan(2);
+    expect(buildJourney(null)).toEqual([]);
+  });
+
+  it('completes a walk on its own, but never boards or alights for the rider', () => {
+    const steps = buildJourney(trip());
+    const there = { metersToTarget: 5, atTarget: true, approaching: false };
+
+    expect(shouldAutoAdvance(steps.find((s) => s.kind === 'walk')!, there)).toBe(true);
+    expect(shouldAutoAdvance(steps.find((s) => s.kind === 'wait')!, there)).toBe(false);
+    expect(shouldAutoAdvance(steps.find((s) => s.kind === 'ride')!, there)).toBe(false);
+  });
+
+  it('counts a stop reached to the accuracy the fix actually claims', () => {
+    const step = buildJourney(trip()).find((s) => s.kind === 'walk')!;
+    const hundred = north(step.target, 100);
+
+    expect(stepProgress(step, { ...hundred, accuracy: 5 }).atTarget).toBe(false);
+    expect(stepProgress(step, { ...hundred, accuracy: 150 }).atTarget).toBe(true);
+    // A wild reading does not turn the whole island into the bus stop.
+    expect(arrivalRadius(9000)).toBe(120);
+    expect(arrivalRadius(undefined)).toBe(ARRIVE_RADIUS_M);
+  });
+
+  it('says to get off before the stop, not as it goes past', () => {
+    const ride = buildJourney(trip()).find((s) => s.kind === 'ride')!;
+    const soon = stepProgress(ride, { ...north(ride.target, APPROACH_RADIUS_M - 50), accuracy: 10 });
+
+    expect(soon.approaching).toBe(true);
+    expect(soon.atTarget).toBe(false);
+    expect(stepProgress(ride, { ...north(ride.target, 1000), accuracy: 10 }).approaching).toBe(
+      false,
+    );
+  });
+
+  it('claims nothing about where the rider is without a fix', () => {
+    const step = buildJourney(trip())[0];
+    expect(stepProgress(step, null)).toEqual({
+      metersToTarget: null,
+      atTarget: false,
+      approaching: false,
+    });
+    expect(stepProgress(null, { lat: 4.17, lng: 73.5 })).toEqual({
+      metersToTarget: null,
+      atTarget: false,
+      approaching: false,
+    });
+  });
+
+  it('counts down the stops left as the bus works along the route', () => {
+    const r1 = [...graph.routes.values()].find((r) => r.routeNumber === 'R1')!;
+    const stops = r1.stops
+      .slice(0, 5)
+      .map((s) => graph.stops.get(s.stopCode)!)
+      .map((s) => ({ lat: s.lat, lng: s.lng }));
+
+    expect(stopsRemaining(stops, stops[0])).toBe(4);
+    expect(stopsRemaining(stops, stops[3])).toBe(1);
+    expect(stopsRemaining(stops, stops[4])).toBe(0);
+    // Nothing to count without a fix, or with nowhere to count between.
+    expect(stopsRemaining(stops, null)).toBeNull();
+    expect(stopsRemaining([stops[0]], stops[0])).toBeNull();
+  });
+
+  it('believes the rider over a fix that has stopped agreeing with them', () => {
+    const steps = buildJourney(trip());
+    const walk = steps.find((s) => s.kind === 'walk')!;
+    // Getting off a bus in Hulhumalé with a phone that last saw the sky in Malé.
+    const anchor = { lat: 4.2113, lng: 73.5391 };
+    const stale = { lat: 4.1755, lng: 73.5093, accuracy: 20 };
+
+    expect(believedPosition(walk, anchor, stale)).toEqual(anchor);
+    // Once it catches up, the fix is the better answer of the two.
+    const caughtUp = { ...north(anchor, TRUST_M - 100), accuracy: 20 };
+    expect(believedPosition(walk, anchor, caughtUp)).toEqual(caughtUp);
+    // And walking the length of the step never makes the rider disbelieved.
+    expect(believedPosition(walk, anchor, { ...walk.target, accuracy: 20 })?.lat).toBe(
+      walk.target.lat,
+    );
+  });
+
+  it('judges a fix taken mid-ride against the ride, not against its ends', () => {
+    const ride = buildJourney(trip()).find((s) => s.kind === 'ride')!;
+    const board = { lat: ride.bus!.boardStop.lat, lng: ride.bus!.boardStop.lng };
+    const halfway = {
+      lat: (board.lat + ride.target.lat) / 2,
+      lng: (board.lng + ride.target.lng) / 2,
+      accuracy: 20,
+    };
+    expect(believedPosition(ride, board, halfway)).toEqual(halfway);
+
+    // A phone still reporting the island the rider left is not on this bus.
+    const otherIsland = { lat: board.lat + 0.08, lng: board.lng + 0.08, accuracy: 20 };
+    expect(believedPosition(ride, board, otherIsland)).toEqual(board);
+
+    // With nothing reported at all, the last confirmed stop is all there is.
+    expect(believedPosition(ride, board, null)).toEqual(board);
+    expect(believedPosition(ride, null, null)).toBeNull();
+  });
+
+  it('measures progress by steps done, not by steps listed', () => {
+    const steps = buildJourney(trip());
+    expect(journeyFraction(steps, 0)).toBe(0);
+    expect(journeyFraction(steps, steps.length - 1)).toBe(1);
+    expect(journeyFraction(steps, 1)).toBeGreaterThan(0);
+    expect(journeyFraction([], 0)).toBe(0);
   });
 });

@@ -14,6 +14,7 @@
 import { chromium } from 'playwright';
 
 const URL = process.env.E2E_URL ?? 'http://localhost:4173/';
+const RTL_API = 'https://bo.rtl.mv:4455/maldives/api';
 const failures = [];
 
 function check(condition, message) {
@@ -362,6 +363,122 @@ check(
   `results follow the clock (13:55 "${atFirstSight}" -> 13:56 "${aMinuteLater}")`,
 );
 await clockCtx.close();
+
+// Riding it, rather than reading about it. The rider is guided step by step, the
+// fix moves them on where it can be trusted to, and the address bar carries the
+// step so a phone that dies at the stop comes back to the same instruction.
+//
+// The rider is walked to the first stop by moving the fix, which is the part no
+// unit test can prove: the app has to notice on its own and move the journey on
+// without a tap. Boarding and alighting stay taps by design.
+const navCtx = await browser.newContext({
+  viewport: { width: 390, height: 844 },
+  isMobile: true,
+  hasTouch: true,
+  geolocation: { latitude: 4.17873, longitude: 73.50953 }, // ~400 m north of City Square
+  permissions: ['geolocation'],
+});
+const navPage = await navCtx.newPage();
+const navErrors = [];
+// Which stop the planner picks depends on the timetable at the moment this runs,
+// so the stop to walk to is read back out of the instruction and looked up,
+// rather than pinned to whichever one it chose the day this was written.
+const stopCoords = new Map();
+for (const route of (await (await fetch(`${RTL_API}/booking/v2/bus/routedetails`)).json())
+  .routeResponse ?? []) {
+  for (const stop of route.busRouteStopList ?? []) {
+    if (!stopCoords.has(stop.name)) {
+      stopCoords.set(stop.name, {
+        latitude: Number(stop.latitude),
+        longitude: Number(stop.longitude),
+      });
+    }
+  }
+}
+navPage.on('pageerror', (e) => navErrors.push(`pageerror: ${e.message}`));
+
+await navPage.goto(`${URL}?from=4.17873,73.50953,Test&to=stop:111`, {
+  waitUntil: 'networkidle',
+  timeout: 45_000,
+});
+await navPage.waitForTimeout(7000);
+await navPage.locator('button').filter({ hasText: /transfer|Direct/ }).first().click();
+await navPage.waitForTimeout(3000);
+
+await navPage.getByRole('button', { name: 'Start journey' }).click();
+await navPage.waitForTimeout(2500);
+
+// The action lives in the sheet's own footer, out of the scrolling content, so
+// it is in the same place whatever the instruction above it says.
+const navAction = navPage.locator('div.absolute.inset-x-0.bottom-0.z-20 > div:last-child button').first();
+const navHeading = () => navPage.locator('h2').first().innerText();
+const navBody = () => navPage.locator('body').innerText();
+
+const firstStep = await navHeading();
+check(/^Walk to /.test(firstStep), `a started journey opens with the first instruction (${firstStep})`);
+check(/step=walk-0/.test(navPage.url()), `the step is in the address bar (${query(navPage.url())})`);
+check(/\d+ m away/.test(await navBody()), 'the rider is told how far off they are');
+
+// Standing at the stop. Nothing is tapped: the app must see it.
+const walkTarget = stopCoords.get(/^Walk to (.+)$/.exec(firstStep)?.[1]?.trim());
+check(walkTarget !== undefined, `the stop being walked to is a real stop (${firstStep})`);
+await navCtx.setGeolocation(walkTarget);
+await navPage.waitForTimeout(3000);
+check(/^Wait for /.test(await navHeading()), 'arriving on foot advances the journey by itself');
+check(/step=wait-/.test(navPage.url()), 'and the address bar follows it');
+
+// A reload mid-journey is a rider whose phone died at the stop.
+const resumed = navPage.url();
+await navPage.reload({ waitUntil: 'networkidle' });
+await navPage.waitForTimeout(9000);
+check(
+  /^Wait for /.test(await navHeading()) && query(navPage.url()) === query(resumed),
+  'a reload comes back to the same step of the same journey',
+);
+
+await navAction.click();
+await navPage.waitForTimeout(1500);
+check(/^Ride to /.test(await navHeading()), 'boarding is the rider\'s word, never the app\'s');
+check(/stops? to go|Getting off here/.test(await navBody()), 'the ride counts the stops left');
+
+// Tap through whatever remains — a transfer, a last walk — to the end.
+//
+// The fix has not moved since the first stop, which is the ordinary state of a
+// phone in a pocket on a bus. Every step after a confirmed one is therefore
+// measured from what the rider said, not from where the handset thinks it is:
+// getting off at a transfer must leave them at that stop and metres from the
+// next instruction, never kilometres away from it.
+let wasRiding = false;
+for (let i = 0; i < 8; i++) {
+  if (/Done/.test(await navAction.innerText())) break;
+  wasRiding = /^Ride to /.test(await navHeading());
+  await navAction.click();
+  await navPage.waitForTimeout(1500);
+  if (wasRiding) {
+    const after = await navBody();
+    check(
+      !/\d[\d.]* km away/.test(after),
+      `getting off puts the rider at that stop, not where the fix was left (${
+        /(\d[\d.]* (?:k?m) away)/.exec(after)?.[1] ?? 'no distance claimed'
+      })`,
+    );
+  }
+}
+check(
+  /You have reached your destination/.test(await navBody()),
+  'the journey ends by saying so, and summarises the trip',
+);
+
+await navAction.click();
+await navPage.waitForTimeout(1200);
+check(
+  /Start journey/.test(await navBody()) && !/step=/.test(navPage.url()),
+  'finishing hands the trip back and clears the journey from the url',
+);
+// The basemap host 404s one glyph range at street zoom, which is upstream and
+// not the app's to fix, so only errors the page itself raised are counted.
+check(navErrors.length === 0, `no page errors while navigating${navErrors.length ? `: ${navErrors[0]}` : ''}`);
+await navCtx.close();
 
 await browser.close();
 console.log(failures.length === 0 ? '\nAll checks passed.' : `\n${failures.length} failed.`);

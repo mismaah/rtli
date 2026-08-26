@@ -15,6 +15,12 @@ interface BottomSheetProps {
   children: ReactNode;
   /** Rendered inside the grab area, beside the handle. */
   header?: ReactNode;
+  /**
+   * Pinned below the scrolling content — for the one action a screen exists to
+   * offer. Kept out of the scroll area so it cannot cover what it sits under,
+   * and so a rider mid-journey never has to scroll to find the button.
+   */
+  footer?: ReactNode;
 }
 
 /**
@@ -25,7 +31,7 @@ interface BottomSheetProps {
  * identically with touch, pen and mouse, and so the sheet can be dismissed
  * one-handed.
  */
-export function BottomSheet({ snap, onSnapChange, header, children }: BottomSheetProps) {
+export function BottomSheet({ snap, onSnapChange, header, footer, children }: BottomSheetProps) {
   const [dragOffset, setDragOffset] = useState(0);
   const startY = useRef<number | null>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
@@ -77,6 +83,14 @@ export function BottomSheet({ snap, onSnapChange, header, children }: BottomShee
         >
           {children}
         </div>
+        {footer ? (
+          <div
+            className="shrink-0 border-t border-white/10 px-4 pt-3"
+            style={{ paddingBottom: 'calc(var(--safe-bottom) + 0.75rem)' }}
+          >
+            {footer}
+          </div>
+        ) : null}
       </aside>
     );
   }
@@ -104,10 +118,18 @@ export function BottomSheet({ snap, onSnapChange, header, children }: BottomShee
       <div
         ref={sheetRef}
         className="no-scrollbar flex-1 overflow-y-auto overscroll-contain px-4"
-        style={{ paddingBottom: 'calc(var(--safe-bottom) + 1rem)' }}
+        style={{ paddingBottom: footer ? '0.75rem' : 'calc(var(--safe-bottom) + 1rem)' }}
       >
         {children}
       </div>
+      {footer ? (
+        <div
+          className="shrink-0 border-t border-white/10 px-4 pt-3"
+          style={{ paddingBottom: 'calc(var(--safe-bottom) + 0.75rem)' }}
+        >
+          {footer}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -143,11 +143,70 @@ Tapping a bus shows what is actually known about it: plate and vehicle code,
 inferred heading and speed, how long since it last moved, and how old the reading
 is. All of it is labelled as estimated, because none of it is telemetry.
 
+### Riding it
+
+The planner's job ends where the rider's begins. **Start journey** turns the
+chosen trip into one instruction at a time — walk to this stop, wait for this
+bus, ride to that one, you have arrived — with the thing that completes the step
+as a thumb-sized button pinned below the sheet, in the same place whatever it
+says.
+
+A bus leg becomes two steps, because standing at a stop watching for a bus that
+has not come and sitting on it counting stops are different situations: they need
+different instructions, a different button and a different map.
+
+**Only walking completes itself.** Arriving at a stop on foot is unambiguous, so
+the fix moves the journey on and the rider never has to tell the app what it can
+see. Being beside a bus and being on it are the same coordinates, though, and a
+bus passes the alighting stop whether or not anybody stands up — so *I've
+boarded* and *I've got off* stay taps. An app that boarded you onto a bus you
+watched pull away would be worse than one that waits to be told, and there is a
+*back a step* under the button for the stop that went past while you were looking
+at your phone.
+
+**A tap outranks the fix.** Someone who presses *I've got off* is standing at
+that stop, and that is a harder fact than anything a phone can infer: a handset
+that last saw the sky in Malé will happily go on reporting Malé while its owner
+steps off a bus in Hulhumalé. So the last stop the rider confirmed is the anchor,
+and the reported position is preferred over it only while the two are telling the
+same story — within 800 m of either the anchor or where this step ends, which is
+wide enough that walking the length of a step never makes the rider disbelieved.
+A ride is judged against the ride itself rather than its ends, since a rider
+halfway along is far from both. It is why getting off at a transfer moves the map
+onto the next route instead of snapping back to where the phone last had a fix.
+
+How close counts as "there" follows the accuracy the browser reports rather than
+a fixed radius, because a consumer GPS is good to twenty metres on the seafront
+and much worse between the tower blocks — clamped at 120 m, since past that the
+reading is not a bus stop, it is a neighbourhood. With no fix at all nothing is
+claimed and every step is a tap, which is exactly the app with location refused.
+
+While riding, the alighting stop is announced at 250 m — far enough out to stand
+up, rather than as it goes past — with a buzz, since that is the moment a rider
+most needs telling and is least likely to be looking at the screen. The rest of
+the ride is listed stop by stop with the ones already passed faded, so the count
+can be followed out of the window instead of trusted.
+
+The map follows whatever the step is *about*. Walking and riding are about the
+rider, so it keeps them centred; waiting and arriving are about a place, so it
+centres the stop or the door. The two are framed together only while they are
+close enough for that to show anything. This matters most at a transfer: the
+rider gets off in Hulhumalé having last been fixed in Malé, and a box around both
+would draw eight kilometres of link road instead of the stop they are standing
+at. A deliberate pan hands the map back and offers a *recentre*; every new
+instruction takes it again.
+
+The screen is held awake for as long as the journey runs, because a rider walking
+to a stop is not touching their phone and unlocking it one-handed at a junction
+to find out where to go next is the whole problem.
+
 ### Links
 
 The trip lives in the address bar — `?from=me&to=stop:T02&route=...` — so a
 refresh comes back to the same screen and the link opens the same trip on someone
-else's phone. `me` is the rider's own position rather than a fixed point, which
+else's phone. A journey under way is carried there too, as `&step=ride-1&since=845`:
+a phone that dies at the stop comes back to the instruction it was on and to the
+clock it started, not to the top of the trip. `me` is the rider's own position rather than a fixed point, which
 is also how the recents list knows that the same journey started three streets
 apart on two different days is one journey and not two.
 
@@ -176,8 +235,10 @@ src/
     time.ts       clock parsing pinned to UTC+5 (Maldives has no DST)
     urlState.ts   the trip in the address bar
     transit/      graph building, RAPTOR planner, live overlay, ETA parsing,
-                  bus heading inference, route snapping, place identity
+                  bus heading inference, route snapping, place identity,
+                  journey steps
   hooks/          data fetching, geolocation, search
   components/     UI and map layers
-  screens/        home, results, trip detail, stop detail, saved places
+  screens/        home, results, trip detail, step-by-step journey, stop
+                  detail, saved places
 ```

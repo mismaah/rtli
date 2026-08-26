@@ -71,3 +71,25 @@ export function TripDetail({ itinerary, liveApplied, onBack }: Props) {
     </div>
   );
 }
+
+/**
+ * Pinned below the trip rather than placed within it: the timeline is as long as
+ * the journey is, and the one thing a rider standing at a stop wants — to be
+ * walked through it — should never be somewhere they have to scroll to find.
+ */
+export function StartJourneyBar({ onStart }: { onStart: () => void }) {
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={onStart}
+        className="min-h-14 w-full rounded-2xl bg-brand-500 px-6 text-base font-semibold text-white shadow-lg shadow-brand-500/20 active:bg-brand-400"
+      >
+        Start journey
+      </button>
+      <p className="pt-2 text-center text-[11px] text-ink-500">
+        Step-by-step directions that follow you as you go
+      </p>
+    </div>
+  );
+}

@@ -1,8 +1,10 @@
 /**
  * The trip in the address bar.
  *
- * Keeping origin, destination and the chosen route in the URL is what makes a
- * refresh land back on the same screen and a link land someone else on it too.
+ * Keeping origin, destination, the chosen route and the step of a journey in
+ * progress in the URL is what makes a refresh land back on the same screen and a
+ * link land someone else on it too.
+ *
  * The state is written with `replaceState`: these are edits to one journey, not
  * separate pages, and pushing every retyped stop into history would leave the
  * back button walking through a rider's typing.
@@ -15,9 +17,17 @@ export interface UrlState {
   to?: string;
   /** The chosen itinerary, as `itinerarySignature` writes it. */
   route?: string;
+  /**
+   * The step of a journey under way, as `JourneyStep.id` writes it. Its presence
+   * is what says a rider is travelling rather than reading — a phone that dies
+   * halfway to the stop comes back to the same instruction, not to the top.
+   */
+  step?: string;
+  /** Minutes since Malé midnight the journey was started, so elapsed survives a reload. */
+  since?: string;
 }
 
-const KEYS = ['from', 'to', 'route'] as const;
+const KEYS = ['from', 'to', 'route', 'step', 'since'] as const;
 
 export function readUrlState(search: string = window.location.search): UrlState {
   const params = new URLSearchParams(search);

@@ -10,10 +10,12 @@ import { BusMarkers } from '@/components/map/BusMarkers';
 import { WalkRouteLayer } from '@/components/map/WalkRouteLayer';
 import { UserMarker } from '@/components/map/UserMarker';
 import { EndpointMarkers } from '@/components/map/EndpointMarkers';
+import { FollowUser } from '@/components/map/FollowUser';
 import { Home } from '@/screens/Home';
 import { Results } from '@/screens/Results';
-import { TripDetail } from '@/screens/TripDetail';
+import { TripDetail, StartJourneyBar } from '@/screens/TripDetail';
 import { StopDetail } from '@/screens/StopDetail';
+import { JourneyNav, JourneyActionBar } from '@/screens/JourneyNav';
 import { Saved } from '@/screens/Saved';
 import { useTransitGraph } from '@/hooks/useTransitGraph';
 import { useGeolocation } from '@/hooks/useGeolocation';
@@ -21,6 +23,8 @@ import { usePlan } from '@/hooks/usePlan';
 import { useOnline } from '@/hooks/useOnline';
 import { useWideLayout } from '@/hooks/useWideLayout';
 import { useWalkPaths } from '@/hooks/useWalkPaths';
+import { useJourney } from '@/hooks/useJourney';
+import { useWakeLock } from '@/hooks/useWakeLock';
 import { useSavedPlaces } from '@/store/savedPlaces';
 import { useRecentTrips } from '@/store/recentTrips';
 import { boundsOf } from '@/lib/geo';
@@ -54,6 +58,8 @@ export default function App() {
   const [selected, setSelected] = useState<Itinerary | null>(null);
   const [selectedStop, setSelectedStop] = useState<Stop | null>(null);
   const [snap, setSnap] = useState<SheetSnap>('half');
+  /** Whether the map is still tracking the rider, or they have panned away. */
+  const [following, setFollowing] = useState(true);
 
   const addSaved = useSavedPlaces((s) => s.add);
   const savedPlaces = useSavedPlaces((s) => s.places);
@@ -74,6 +80,10 @@ export default function App() {
   );
   const pendingTo = useRef<PlaceRef | null>(parsePlaceRef(initialUrl.to));
   const pendingRoute = useRef<string | null>(initialUrl.route ?? null);
+  // A journey in progress, held the same way: the step cannot be honoured until
+  // the itinerary it belongs to has been planned and picked out of the results.
+  const pendingStep = useRef<string | null>(initialUrl.step ?? null);
+  const pendingSince = useRef<string | null>(initialUrl.since ?? null);
 
   const locationRefused = geo.status === 'denied' || geo.status === 'unavailable';
 
@@ -134,28 +144,16 @@ export default function App() {
     pendingRoute.current = null;
 
     const match = itineraries.find((it) => itinerarySignature(it) === signature);
-    if (!match) return;
+    if (!match) {
+      // No trip to be part-way through.
+      pendingStep.current = null;
+      pendingSince.current = null;
+      return;
+    }
     setSelected(match);
     setView('detail');
     setSnap('half');
   }, [itineraries]);
-
-  /**
-   * Mirrors the trip into the address bar, so a refresh comes back to it and a
-   * copied link takes someone else there. Requests still waiting on the graph or
-   * on a location fix are written back as they came in, so a reload during those
-   * first seconds does not lose them.
-   */
-  useEffect(() => {
-    writeUrlState({
-      from: origin ? encodePlace(origin) : encodeRef(pendingFrom.current),
-      to: destination ? encodePlace(destination) : encodeRef(pendingTo.current),
-      route:
-        view === 'detail' && selected
-          ? itinerarySignature(selected)
-          : (pendingRoute.current ?? undefined),
-    });
-  }, [origin, destination, selected, view]);
 
   const stops = useMemo(() => (graph ? [...graph.stops.values()] : []), [graph]);
 
@@ -246,6 +244,83 @@ export default function App() {
     [detail, walkPaths],
   );
 
+  /**
+   * The journey as it is being travelled, rather than read about.
+   *
+   * Fed the same routed itinerary the map draws, so the step the rider is on is
+   * measured against the footpath they are actually walking. It is built from
+   * whatever trip is open, and only becomes a journey once they start one.
+   */
+  const journey = useJourney(walkedDetail, geo.position, {
+    initialStepId: pendingStep.current,
+    // A hand-edited or truncated link must not turn the elapsed clock into NaN.
+    initialStartedAt: minutesFromUrl(pendingSince.current),
+  });
+  useWakeLock(journey.active);
+
+  /**
+   * The stops of the ride under way, board to alight, so the rider can follow
+   * along out of the window. Empty when they are not aboard — and when a stop is
+   * missing from the graph, since a count that cannot be right is worth less
+   * than none.
+   */
+  const rideStops = useMemo(() => {
+    const step = journey.step;
+    if (!graph || step?.kind !== 'ride' || !step.bus) return [];
+    const codes = step.bus.route.stops.map((s) => s.stopCode);
+    const ridden = riddenStopCodes(
+      codes,
+      codes.indexOf(step.bus.boardStop.code),
+      codes.indexOf(step.bus.alightStop.code),
+    );
+    const points = ridden.map((code) => graph.stops.get(code));
+    return points.every((p) => p != null) ? (points as Stop[]) : [];
+  }, [graph, journey.step]);
+
+  const startJourney = useCallback(() => {
+    pendingStep.current = null;
+    pendingSince.current = null;
+    setSnap('half');
+    setFollowing(true);
+    journey.start();
+  }, [journey.start]);
+
+  const endJourney = useCallback(() => {
+    pendingStep.current = null;
+    pendingSince.current = null;
+    journey.end();
+  }, [journey.end]);
+
+  // Every new instruction reframes the map on it. Someone who panned away to
+  // look at something has finished with that view once they are told to move.
+  const stepId = journey.step?.id;
+  useEffect(() => {
+    if (stepId) setFollowing(true);
+  }, [stepId]);
+
+  /**
+   * Mirrors the trip into the address bar, so a refresh comes back to it and a
+   * copied link takes someone else there. Requests still waiting on the graph or
+   * on a location fix are written back as they came in, so a reload during those
+   * first seconds does not lose them — and that includes a journey under way,
+   * which comes back at the step it was on rather than at the beginning.
+   */
+  useEffect(() => {
+    const travelling = journey.active;
+    writeUrlState({
+      from: origin ? encodePlace(origin) : encodeRef(pendingFrom.current),
+      to: destination ? encodePlace(destination) : encodeRef(pendingTo.current),
+      route:
+        view === 'detail' && selected
+          ? itinerarySignature(selected)
+          : (pendingRoute.current ?? undefined),
+      step: travelling ? journey.step?.id : (pendingStep.current ?? undefined),
+      since: travelling
+        ? (journey.startedAt?.toString() ?? undefined)
+        : (pendingSince.current ?? undefined),
+    });
+  }, [origin, destination, selected, view, journey.active, journey.step, journey.startedAt]);
+
   const handlePick = useCallback(
     (place: Place) => {
       if (searching === 'origin') chooseOrigin(place);
@@ -258,13 +333,16 @@ export default function App() {
 
   const handleStopSelect = useCallback(
     (stopCode: string) => {
+      // Mid-journey the sheet belongs to the next instruction. Replacing it with
+      // a stop's timetable would also take the trip the journey is following.
+      if (journey.active) return;
       const stop = graph?.stops.get(stopCode);
       if (!stop) return;
       setSelectedStop(stop);
       setView('stop');
       setSnap('half');
     },
-    [graph],
+    [graph, journey.active],
   );
 
   const destinationSaved = useMemo(
@@ -278,6 +356,18 @@ export default function App() {
       ),
     [savedPlaces, destination],
   );
+
+  /**
+   * The one action the open screen exists to offer, pinned below it. A journey
+   * is read while moving, so the button that completes the current step has to
+   * be in the same place every time and never behind a scroll.
+   */
+  const sheetFooter =
+    graph && view === 'detail' && journey.active && walkedDetail ? (
+      <JourneyActionBar journey={journey} onExit={endJourney} />
+    ) : graph && view === 'detail' && selected ? (
+      <StartJourneyBar onStart={startJourney} />
+    ) : null;
 
   if (isError) {
     return <FatalError message={(error as Error).message} onRetry={() => refetch()} />;
@@ -312,8 +402,29 @@ export default function App() {
               <BusMarkers key={leg.route.code} route={leg.route} />
             ))}
           {walkedDetail && <WalkRouteLayer itinerary={walkedDetail} />}
-          <FitBounds selected={walkedDetail} origin={origin} destination={destination} />
+          {journey.active ? (
+            <FollowUser
+              position={journey.position}
+              step={journey.step}
+              active={following}
+              onUserMove={() => setFollowing(false)}
+            />
+          ) : (
+            <FitBounds selected={walkedDetail} origin={origin} destination={destination} />
+          )}
         </LazyMap>
+
+        {journey.active && !following && geo.position && (
+          <button
+            type="button"
+            onClick={() => setFollowing(true)}
+            className="absolute right-4 z-10 inline-flex min-h-11 items-center gap-1.5 rounded-full bg-ink-900/90 px-4 text-sm font-medium text-brand-400 shadow-lg backdrop-blur active:bg-ink-800"
+            style={{ bottom: sheetHeightPx + 12 }}
+          >
+            <LocateIcon />
+            Recentre
+          </button>
+        )}
 
         <header
           className="pointer-events-none absolute inset-x-0 top-0 z-10 px-4"
@@ -333,7 +444,7 @@ export default function App() {
         </header>
       </div>
 
-      <BottomSheet snap={snap} onSnapChange={setSnap}>
+      <BottomSheet snap={snap} onSnapChange={setSnap} footer={sheetFooter}>
         {isLoading && <p className="py-8 text-center text-sm text-ink-500">Loading bus routes…</p>}
 
         {graph && view === 'home' && (
@@ -362,6 +473,7 @@ export default function App() {
             destinationSaved={destinationSaved}
             onSaveDestination={() => destination && addSaved(destination)}
             onSelect={(it) => {
+              endJourney();
               setSelected(it);
               setView('detail');
               setSnap('half');
@@ -371,7 +483,7 @@ export default function App() {
           />
         )}
 
-        {graph && view === 'detail' && selected && (
+        {graph && view === 'detail' && selected && !journey.active && (
           <TripDetail
             itinerary={walkedDetail ?? selected}
             liveApplied={liveApplied}
@@ -379,6 +491,17 @@ export default function App() {
               setSelected(null);
               setView('results');
             }}
+          />
+        )}
+
+        {graph && journey.active && walkedDetail && (
+          <JourneyNav
+            itinerary={walkedDetail}
+            journey={journey}
+            rideStops={rideStops}
+            position={journey.position}
+            liveApplied={liveApplied}
+            onExit={endJourney}
           />
         )}
 
@@ -419,6 +542,20 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function LocateIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-4 fill-current" aria-hidden>
+      <path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm8.9 3a9 9 0 0 0-7.9-7.9V1h-2v2.1A9 9 0 0 0 3.1 11H1v2h2.1a9 9 0 0 0 7.9 7.9V23h2v-2.1a9 9 0 0 0 7.9-7.9H23v-2h-2.1ZM12 19a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z" />
+    </svg>
+  );
+}
+
+/** A clock reading out of the address bar, or null if it is not one. */
+function minutesFromUrl(raw: string | null): number | null {
+  const minutes = Number(raw);
+  return raw && Number.isFinite(minutes) && minutes >= 0 && minutes < 1440 ? minutes : null;
 }
 
 /** A place request that has not resolved yet, written back as the URL had it. */
