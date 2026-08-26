@@ -8,13 +8,18 @@ interface Props {
   onSelect?: (stopCode: string) => void;
   /** Stops to draw larger, e.g. the ones on the chosen itinerary. */
   highlighted?: string[];
+  /**
+   * Stops on a drawn route that this journey never calls at — the rest of the
+   * loop, past where the rider gets off. Faded to match the line through them.
+   */
+  dimmed?: string[];
 }
 
 /**
  * Bus stops as a single symbol layer rather than DOM markers — 101 markers is
  * enough to cost noticeable scroll performance on a mid-range phone.
  */
-export function StopMarkers({ stops, onSelect, highlighted = [] }: Props) {
+export function StopMarkers({ stops, onSelect, highlighted = [], dimmed = [] }: Props) {
   const map = useMap();
 
   useEffect(() => {
@@ -31,6 +36,7 @@ export function StopMarkers({ stops, onSelect, highlighted = [] }: Props) {
           code: s.code,
           name: s.name,
           highlighted: highlighted.includes(s.code) ? 1 : 0,
+          dimmed: dimmed.includes(s.code) ? 1 : 0,
         },
       })),
     };
@@ -65,12 +71,15 @@ export function StopMarkers({ stops, onSelect, highlighted = [] }: Props) {
             14, ['case', ['==', ['get', 'highlighted'], 1], 2, 1.5],
           ],
           'circle-stroke-color': '#0b1120',
+          // Stops the rider passes but never uses are dimmed below the ordinary
+          // ones: on the detail screen the drawn route is what the eye follows,
+          // and its far end should not read as somewhere this trip goes.
           'circle-opacity': [
             'interpolate',
             ['linear'],
             ['zoom'],
-            11, ['case', ['==', ['get', 'highlighted'], 1], 1, 0.45],
-            14, ['case', ['==', ['get', 'highlighted'], 1], 1, 0.9],
+            11, ['case', ['==', ['get', 'highlighted'], 1], 1, ['==', ['get', 'dimmed'], 1], 0.2, 0.45],
+            14, ['case', ['==', ['get', 'highlighted'], 1], 1, ['==', ['get', 'dimmed'], 1], 0.35, 0.9],
           ],
         },
       });
@@ -91,6 +100,7 @@ export function StopMarkers({ stops, onSelect, highlighted = [] }: Props) {
           'text-color': '#e2e8f0',
           'text-halo-color': '#0b1120',
           'text-halo-width': 1.4,
+          'text-opacity': ['case', ['==', ['get', 'dimmed'], 1], 0.4, 1],
         },
       });
     } else {
@@ -118,7 +128,7 @@ export function StopMarkers({ stops, onSelect, highlighted = [] }: Props) {
         map.off('mouseleave', layerId, clearPointer);
       }
     };
-  }, [map, stops, onSelect, highlighted]);
+  }, [map, stops, onSelect, highlighted, dimmed]);
 
   useEffect(() => {
     return () => removeLayers(map, ['stops-labels', 'stops-circles'], 'stops');

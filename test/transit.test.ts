@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import fixture from './fixtures/routedetails.json';
+import roadShapeR1 from './fixtures/roadshape-r1.json';
 import { buildGraph, MAX_TRANSFER_WALK_M } from '@/lib/transit/buildGraph';
 import {
   generalizedCost,
@@ -43,6 +44,7 @@ import {
 } from '@/lib/transit/places';
 import { readUrlState, toQueryString, writeUrlState } from '@/lib/urlState';
 import { applyWalkPaths, walkLineOf, walkPathKey } from '@/lib/transit/walkPaths';
+import { riddenShape, riddenStopCodes, shapePath, stopOffsets } from '@/lib/transit/routeShape';
 import { useRecentTrips } from '@/store/recentTrips';
 import type { LiveBus } from '@/api/rtl';
 import type { RouteDetailsResponse } from '@/api/rtl';
@@ -903,5 +905,85 @@ describe('walking paths', () => {
     expect((trip.legs[0] as WalkLeg).path).toBeUndefined();
     expect(walked.legs[0]).not.toBe(trip.legs[0]);
     expect(walked.id).toBe(trip.id);
+  });
+});
+
+
+describe('the ridden part of a route', () => {
+  const graph = buildGraph(fixture as RouteDetailsResponse);
+  const r1 = [...graph.routes.values()].find((r) => r.routeNumber === 'R1')!;
+  const shape = roadShapeR1 as GeoJSON.FeatureCollection;
+  const points = r1.stops.map((s) => graph.stops.get(s.stopCode)!);
+  const names = r1.stops.map((s) => graph.stops.get(s.stopCode)!.name);
+
+  it('places every stop on the geometry, in calling order', () => {
+    const path = shapePath(shape)!;
+    expect(path.length).toBeGreaterThan(15_000);
+
+    const offsets = stopOffsets(path, points)!;
+    expect(offsets).toHaveLength(r1.stops.length);
+    for (let i = 1; i < offsets.length; i++) {
+      expect(offsets[i]).toBeGreaterThan(offsets[i - 1]);
+    }
+    // One lap of the loop covers the lot; a sequence needing more than that has
+    // sent the bus round twice to reach its own last stop.
+    expect(offsets[offsets.length - 1] - offsets[0]).toBeLessThanOrEqual(path.length);
+  });
+
+  it('tells a stop from its twin on the opposite carriageway', () => {
+    // R1 calls at Hulhumale' Cemetery on the way in and at its OPP pole on the
+    // way back out. The two are metres apart, so nearest-point alone puts the
+    // first one half a loop from where the bus actually passes it.
+    const path = shapePath(shape)!;
+    const offsets = stopOffsets(path, points)!;
+    const arriving = names.indexOf("Hulhumale' Cemetery");
+    const leaving = names.indexOf("Hulhumale' Cemetery OPP");
+
+    expect(offsets[leaving] - offsets[arriving]).toBeGreaterThan(3_000);
+  });
+
+  it('cuts the loop into the stretch ridden and the stretch skipped', () => {
+    const board = names.indexOf('STELCO');
+    const alight = names.indexOf('Dhiraagu');
+    const split = riddenShape(shape, points, board, alight)!;
+
+    const ridden = split.features.filter((f) => f.properties?.ridden === true);
+    const rest = split.features.filter((f) => f.properties?.ridden === false);
+    expect(ridden).toHaveLength(1);
+    expect(rest).toHaveLength(2);
+
+    // Roughly STELCO to Dhiraagu: over the bridge and a little way into
+    // Hulhumale', against a 18 km loop.
+    const path = shapePath(shape)!;
+    const riddenM = shapePath({ type: 'FeatureCollection', features: ridden })!.length;
+    expect(riddenM).toBeGreaterThan(7_000);
+    expect(riddenM).toBeLessThan(8_000);
+    expect(riddenM).toBeLessThan(path.length / 2);
+  });
+
+  it('draws a ride that runs past the end of the line in two pieces', () => {
+    // The geometry starts near the terminal, so the last leg back to it crosses
+    // the line's own start and cannot be one slice of it.
+    const board = names.indexOf("Hulhumale' Cemetery OPP");
+    const alight = names.lastIndexOf('Maafannu Bus Terminal OPP');
+    const split = riddenShape(shape, points, board, alight)!;
+
+    expect(split.features.filter((f) => f.properties?.ridden === true)).toHaveLength(2);
+    expect(split.features.filter((f) => f.properties?.ridden === false)).toHaveLength(1);
+  });
+
+  it('gives up rather than guessing when the ride cannot be placed', () => {
+    expect(riddenShape(null, points, 0, 5)).toBeNull();
+    // A stop the caller could not find, and a ride that goes nowhere.
+    expect(riddenShape(shape, points, -1, 5)).toBeNull();
+    expect(riddenShape(shape, points, 4, 4)).toBeNull();
+    expect(riddenShape(shape, [], 0, 5)).toBeNull();
+  });
+
+  it('counts every stop called at between boarding and alighting', () => {
+    const codes = r1.stops.map((s) => s.stopCode);
+    expect(riddenStopCodes(codes, 2, 5)).toEqual(codes.slice(2, 6));
+    expect(riddenStopCodes(codes, 3, 3)).toEqual([codes[3]]);
+    expect(riddenStopCodes(codes, -1, 4)).toEqual([]);
   });
 });

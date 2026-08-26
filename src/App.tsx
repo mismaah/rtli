@@ -26,6 +26,7 @@ import { useRecentTrips } from '@/store/recentTrips';
 import { boundsOf } from '@/lib/geo';
 import { itinerarySignature } from '@/lib/transit/plan';
 import { applyWalkPaths, walkLineOf } from '@/lib/transit/walkPaths';
+import { riddenStopCodes } from '@/lib/transit/routeShape';
 import {
   encodePlace,
   isUnresolvable,
@@ -173,10 +174,44 @@ export default function App() {
     );
   }, [selected]);
 
-  const shownRoutes = useMemo(() => {
-    if (!selected) return [];
-    return selected.legs.flatMap((l) => (l.kind === 'bus' ? [l.route] : []));
-  }, [selected]);
+  /**
+   * Each bus leg as the map needs to draw it: the route, where its stops are,
+   * and which run of them the rider is actually aboard for.
+   *
+   * A route's stops are carried as codes, so the coordinates are looked up here
+   * rather than in the layer. An incomplete lookup yields no points at all — the
+   * layer then draws the route whole, which is what it did before any of this.
+   */
+  const busLegs = useMemo(() => {
+    if (!graph || !selected) return [];
+    return selected.legs.flatMap((leg) => {
+      if (leg.kind !== 'bus') return [];
+      const stopCodes = leg.route.stops.map((s) => s.stopCode);
+      const points = stopCodes.map((code) => graph.stops.get(code));
+      return [
+        {
+          route: leg.route,
+          stopCodes,
+          stopPoints: points.every((p) => p != null) ? (points as Stop[]) : [],
+          boardIndex: stopCodes.indexOf(leg.boardStop.code),
+          alightIndex: stopCodes.indexOf(leg.alightStop.code),
+        },
+      ];
+    });
+  }, [graph, selected]);
+
+  /** Stops on a drawn route that this journey passes by rather than uses. */
+  const dimmedStops = useMemo(() => {
+    if (view !== 'detail') return [];
+    const ridden = new Set(
+      busLegs.flatMap((leg) => riddenStopCodes(leg.stopCodes, leg.boardIndex, leg.alightIndex)),
+    );
+    const rest = new Set<string>();
+    for (const leg of busLegs) {
+      for (const code of leg.stopCodes) if (!ridden.has(code)) rest.add(code);
+    }
+    return [...rest];
+  }, [view, busLegs]);
 
   /**
    * The trip detail screen is where a rider sits and waits, so it is the screen
@@ -253,16 +288,28 @@ export default function App() {
       <div className="relative min-w-0 flex-1">
         <LazyMap className="absolute inset-0">
           <MapPadding bottom={sheetHeightPx} />
-          <StopMarkers stops={stops} onSelect={handleStopSelect} highlighted={highlighted} />
+          <StopMarkers
+            stops={stops}
+            onSelect={handleStopSelect}
+            highlighted={highlighted}
+            dimmed={dimmedStops}
+          />
           <UserMarker position={geo.position} />
           <EndpointMarkers origin={origin} destination={destination} userPosition={geo.position} />
           {view === 'detail' &&
-            shownRoutes.map((route) => (
-              <RouteShapeLayer key={route.code} routeCode={route.code} color={route.color} />
+            busLegs.map((leg) => (
+              <RouteShapeLayer
+                key={leg.route.code}
+                routeCode={leg.route.code}
+                color={leg.route.color}
+                stopPoints={leg.stopPoints}
+                boardIndex={leg.boardIndex}
+                alightIndex={leg.alightIndex}
+              />
             ))}
           {view === 'detail' &&
-            shownRoutes.map((route) => (
-              <BusMarkers key={route.code} route={route} />
+            busLegs.map((leg) => (
+              <BusMarkers key={leg.route.code} route={leg.route} />
             ))}
           {walkedDetail && <WalkRouteLayer itinerary={walkedDetail} />}
           <FitBounds selected={walkedDetail} origin={origin} destination={destination} />
