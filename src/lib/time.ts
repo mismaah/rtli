@@ -59,3 +59,18 @@ export function formatAgo(ms: number): string {
   const hours = Math.floor(minutes / 60);
   return `${hours} hr ago`;
 }
+
+/**
+ * Milliseconds until the wall clock crosses into the next minute.
+ *
+ * A plain 60s interval drifts against the clock it is meant to track: started at
+ * 13:55:59 it would not fire until 13:56:59, so the 13:56 bus stays listed for
+ * almost a full minute after it has gone. Re-arming to the boundary keeps every
+ * tick within the same second of the minute changing.
+ *
+ * Malé's offset is a whole number of hours, so the local boundary is the UTC one.
+ */
+export function msUntilNextMinute(nowMs: number = Date.now()): number {
+  const past = ((nowMs % 60_000) + 60_000) % 60_000;
+  return 60_000 - past;
+}

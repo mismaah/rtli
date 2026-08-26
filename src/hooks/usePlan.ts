@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { planJourney } from '@/lib/transit/plan';
-import { applyLiveEtas } from '@/lib/transit/liveOverlay';
-import { minutesOfDay } from '@/lib/time';
+import { fetchLiveEtas, mergeLiveEtas, routeCodesOf } from '@/lib/transit/liveOverlay';
+import { useNowMinutes } from '@/hooks/useNowMinutes';
+import { usePageVisible } from '@/hooks/usePageVisible';
 import { usePrefs } from '@/store/prefs';
 import type { Itinerary, Place, TransitGraph } from '@/lib/transit/types';
 
@@ -11,11 +13,19 @@ export interface PlanResult {
   liveApplied: boolean;
 }
 
+/** Matches StopDetail, so the two views never disagree about the same bus. */
+const POLL_MS = 20_000;
+
 /**
  * Plans a journey, then layers live ETAs on top.
  *
  * The schedule-only result renders immediately and the live pass patches it in
  * when it lands, so a slow or unavailable ETA endpoint never delays results.
+ *
+ * Both halves are re-driven over time. The plan is recomputed as the wall clock
+ * turns over, so a departure that has just gone drops off the list instead of
+ * sitting at the top; the ETAs are polled on their own interval, so the "next in
+ * 4 min" badge counts down rather than freezing at whatever it said on arrival.
  */
 export function usePlan(
   graph: TransitGraph | undefined,
@@ -25,33 +35,46 @@ export function usePlan(
 ): PlanResult {
   const maxWalkM = usePrefs((s) => s.maxWalkM);
   const walkPreference = usePrefs((s) => s.walkPreference);
+  const nowMinutes = useNowMinutes();
+  const visible = usePageVisible();
+
+  // `departAt` pins the search to a chosen time; without one it follows the
+  // clock, which is what makes the results keep up with the minute.
+  const searchFrom = departAt ?? nowMinutes;
 
   const scheduled = useMemo(() => {
     if (!graph || !origin || !destination) return [];
     return planJourney(graph, origin, destination, {
-      departAt: departAt ?? minutesOfDay(),
+      departAt: searchFrom,
       maxWalkM,
       walkPreference,
     });
-  }, [graph, origin, destination, departAt, maxWalkM, walkPreference]);
+  }, [graph, origin, destination, searchFrom, maxWalkM, walkPreference]);
 
-  const [live, setLive] = useState<Itinerary[] | null>(null);
+  const routeCodes = useMemo(() => routeCodesOf(scheduled), [scheduled]);
+  /**
+   * Keyed on which routes are involved rather than on the itineraries.
+   * Replanning on the minute nearly always yields the same handful of routes, so
+   * a key derived from the plan would evict the cache — and blank out every live
+   * badge — once a minute for data that had not changed.
+   */
+  const routeKey = routeCodes.join(',');
 
-  useEffect(() => {
-    setLive(null);
-    if (scheduled.length === 0) return;
-    const controller = new AbortController();
-    let cancelled = false;
+  const { data: liveIndex } = useQuery({
+    queryKey: ['rtl', 'plan-etas', routeKey],
+    queryFn: ({ signal }) => fetchLiveEtas(routeKey.split(','), signal),
+    enabled: visible && routeKey.length > 0,
+    refetchInterval: visible ? POLL_MS : false,
+    // Overrides the app-wide default: an ETA read before the phone went to sleep
+    // is worthless on wake, and this is exactly when the rider looks at it.
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+  });
 
-    applyLiveEtas(scheduled, controller.signal).then((withEtas) => {
-      if (!cancelled) setLive(withEtas);
-    });
+  const itineraries = useMemo(
+    () => (liveIndex ? mergeLiveEtas(scheduled, liveIndex) : scheduled),
+    [scheduled, liveIndex],
+  );
 
-    return () => {
-      cancelled = true;
-      controller.abort();
-    };
-  }, [scheduled]);
-
-  return { itineraries: live ?? scheduled, liveApplied: live !== null };
+  return { itineraries, liveApplied: liveIndex !== undefined || routeKey.length === 0 };
 }

@@ -1,9 +1,22 @@
 import { describe, it, expect } from 'vitest';
 import fixture from './fixtures/routedetails.json';
 import { buildGraph, MAX_TRANSFER_WALK_M } from '@/lib/transit/buildGraph';
-import { generalizedCost, planJourney, totalDistanceM } from '@/lib/transit/plan';
+import {
+  generalizedCost,
+  itinerarySignature,
+  planJourney,
+  totalDistanceM,
+} from '@/lib/transit/plan';
+import { mergeLiveEtas, routeCodesOf, type LiveEtaIndex } from '@/lib/transit/liveOverlay';
 import { parseEta } from '@/lib/transit/parseEta';
-import { parseClock, formatClock, formatDuration, minutesOfDay, formatAgo } from '@/lib/time';
+import {
+  parseClock,
+  formatClock,
+  formatDuration,
+  minutesOfDay,
+  formatAgo,
+  msUntilNextMinute,
+} from '@/lib/time';
 import { haversineMeters, bearingDegrees, compassPoint } from '@/lib/geo';
 import { updateTracks, isStopped, MIN_MOVE_M, MAX_GAP_MS } from '@/lib/transit/busTracks';
 import type { LiveBus } from '@/api/rtl';
@@ -288,6 +301,81 @@ describe('generalizedCost', () => {
   });
 });
 
+describe('following the clock', () => {
+  /**
+   * The reported bug: the app sat on the results at 13:55 showing a 14:00
+   * departure, and at 14:00 the list still showed it. Planning is pure, so the
+   * regression is pinned here on the planner's contract — a plan made a minute
+   * later must not still be offering the bus that has already gone.
+   */
+  it('drops a departure once the clock passes it', () => {
+    const early = planJourney(graph, stopPlace('103'), stopPlace('114'), {
+      departAt: parseClock('12:00')!,
+    });
+    const firstBus = early[0].legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+    const afterItLeft = planJourney(graph, stopPlace('103'), stopPlace('114'), {
+      departAt: firstBus.departAt + 1,
+    });
+    const nextBus = afterItLeft[0].legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+    expect(nextBus.departAt).toBeGreaterThan(firstBus.departAt);
+  });
+
+  it('keeps identifying the same journey across replans', () => {
+    const noon = parseClock('12:00')!;
+    const early = planJourney(graph, stopPlace('103'), stopPlace('114'), { departAt: noon });
+    // Replanned from just after that trip pulled away, as the minute tick does.
+    const later = planJourney(graph, stopPlace('103'), stopPlace('114'), {
+      departAt: early[0].departAt + 1,
+    });
+
+    const signature = itinerarySignature(early[0]);
+    const same = later.find((it) => itinerarySignature(it) === signature);
+
+    // Same buses, same stops, a later departure — this is what lets the detail
+    // screen refresh in place instead of freezing on the trip that has gone.
+    expect(same).toBeDefined();
+    expect(same!.departAt).toBeGreaterThan(early[0].departAt);
+  });
+});
+
+describe('live ETA overlay', () => {
+  const noon = parseClock('12:00')!;
+  const itineraries = planJourney(graph, stopPlace('103'), stopPlace('114'), { departAt: noon });
+
+  it('collects the routes to poll, sorted and deduplicated', () => {
+    const codes = routeCodesOf(itineraries);
+    expect(codes.length).toBeGreaterThan(0);
+    expect(codes).toEqual([...new Set(codes)]);
+    expect(codes).toEqual([...codes].sort());
+  });
+
+  it('attaches an ETA to the leg boarding that stop', () => {
+    const bus = itineraries[0].legs.find((l): l is BusLeg => l.kind === 'bus')!;
+    const index: LiveEtaIndex = new Map([
+      [bus.route.code, new Map([[bus.boardStop.code, { minutes: 4, vehicleCode: 'B1', label: '4 min' }]])],
+    ]);
+
+    const merged = mergeLiveEtas(itineraries, index);
+    const mergedBus = merged[0].legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+    expect(mergedBus.liveEta?.minutes).toBe(4);
+    // The schedule is untouched — live data annotates the plan, never rewrites it.
+    expect(mergedBus.departAt).toBe(bus.departAt);
+  });
+
+  it('preserves identity when a poll matches nothing, so the list does not churn', () => {
+    expect(mergeLiveEtas(itineraries, new Map())).toBe(itineraries);
+
+    const irrelevant: LiveEtaIndex = new Map([
+      ['NOPE', new Map([['999', { minutes: 1, vehicleCode: 'B9', label: '1 min' }]])],
+    ]);
+    const merged = mergeLiveEtas(itineraries, irrelevant);
+    for (let i = 0; i < itineraries.length; i++) expect(merged[i]).toBe(itineraries[i]);
+  });
+});
+
 describe('parseEta', () => {
   it('reads the numeric form, including the trailing space RTL sends', () => {
     expect(parseEta('5 Minutes ')).toEqual({ minutes: 5, vehicleCode: '', label: '5 min' });
@@ -331,6 +419,24 @@ describe('time helpers', () => {
   it('pins minutesOfDay to UTC+5 regardless of host timezone', () => {
     // 2026-08-26T07:30:00Z is 12:30 in Malé.
     expect(minutesOfDay(new Date('2026-08-26T07:30:00Z'))).toBe(12 * 60 + 30);
+  });
+
+  it('re-arms the clock tick on the minute boundary, not 60s from now', () => {
+    // 13:55:59 in Malé — a fixed 60s interval would next fire at 13:56:59,
+    // leaving the 13:56 departure listed for the whole minute after it left.
+    const late = Date.parse('2026-08-26T08:55:59.000Z');
+    expect(msUntilNextMinute(late)).toBe(1_000);
+
+    expect(msUntilNextMinute(Date.parse('2026-08-26T08:55:00.000Z'))).toBe(60_000);
+    expect(msUntilNextMinute(Date.parse('2026-08-26T08:55:30.500Z'))).toBe(29_500);
+  });
+
+  it('crosses the minute so a departure at 14:00 stops being in the future', () => {
+    const before = Math.floor(minutesOfDay(new Date('2026-08-26T08:59:30Z')));
+    const after = Math.floor(minutesOfDay(new Date('2026-08-26T09:00:30Z')));
+
+    expect(before).toBe(13 * 60 + 59);
+    expect(after).toBe(14 * 60);
   });
 });
 

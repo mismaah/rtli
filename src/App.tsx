@@ -22,6 +22,7 @@ import { useWideLayout } from '@/hooks/useWideLayout';
 import { useSavedPlaces } from '@/store/savedPlaces';
 import { useRecentTrips } from '@/store/recentTrips';
 import { boundsOf } from '@/lib/geo';
+import { itinerarySignature } from '@/lib/transit/plan';
 import type { Itinerary, Place, Stop } from '@/lib/transit/types';
 
 type View = 'home' | 'results' | 'detail' | 'stop' | 'saved';
@@ -84,6 +85,20 @@ export default function App() {
     if (!selected) return [];
     return selected.legs.flatMap((l) => (l.kind === 'bus' ? [l.route] : []));
   }, [selected]);
+
+  /**
+   * The trip detail screen is where a rider sits and waits, so it is the screen
+   * that must not go stale. `selected` is the snapshot they tapped; this finds
+   * the same journey in the current plan, which is the next departure on those
+   * same buses with fresh live ETAs. It falls back to the snapshot when the
+   * journey drops out of the results entirely — losing the screen out from under
+   * someone waiting at the stop would be worse than showing them a stale time.
+   */
+  const activeSelection = useMemo(() => {
+    if (!selected) return null;
+    const signature = itinerarySignature(selected);
+    return itineraries.find((it) => itinerarySignature(it) === signature) ?? selected;
+  }, [selected, itineraries]);
 
   const handlePick = useCallback(
     (place: Place) => {
@@ -198,7 +213,7 @@ export default function App() {
 
         {graph && view === 'detail' && selected && (
           <TripDetail
-            itinerary={selected}
+            itinerary={activeSelection ?? selected}
             liveApplied={liveApplied}
             onBack={() => {
               setSelected(null);

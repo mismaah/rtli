@@ -279,6 +279,24 @@ export function totalDistanceM(it: Itinerary): number {
   return it.totalWalkM + it.totalRideM;
 }
 
+/**
+ * Identifies the journey an itinerary describes, independently of when it runs.
+ *
+ * `id` is positional within one search and is not comparable across searches, so
+ * a view holding onto a chosen trip needs this to find that same trip again in a
+ * later plan — the same buses boarded and left at the same stops, just a
+ * departure or two further down the timetable.
+ */
+export function itinerarySignature(it: Itinerary): string {
+  return it.legs
+    .map((l) =>
+      l.kind === 'bus'
+        ? `${l.route.code}@${l.boardStop.code}>${l.alightStop.code}`
+        : `walk:${Math.round(l.meters)}`,
+    )
+    .join('|');
+}
+
 function routesTouching(graph: TransitGraph, marked: Set<StopCode>): Set<string> {
   const out = new Set<string>();
   for (const stopCode of marked) {

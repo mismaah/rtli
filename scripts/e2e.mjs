@@ -200,6 +200,47 @@ check(
 );
 await liveCtx.close();
 
+// Results must follow the clock. A rider who opens the app at 13:55 and waits
+// for the 14:00 bus is the ordinary case, and the plan used to be computed once
+// at mount — so 14:00 came and went with the departed bus still top of the list.
+// The clock is driven rather than waited on, so this costs a second, not five
+// minutes, and it exercises the real timers the app schedules.
+const clockCtx = await browser.newContext({
+  viewport: { width: 390, height: 844 },
+  isMobile: true,
+  hasTouch: true,
+  geolocation: { latitude: 4.1755, longitude: 73.5093 },
+  permissions: ['geolocation'],
+});
+const clockPage = await clockCtx.newPage();
+await clockPage.clock.install({ time: new Date('2026-08-26T08:55:00Z') }); // 13:55 in Malé
+await clockPage.goto(URL, { waitUntil: 'networkidle', timeout: 45_000 });
+await clockPage.clock.runFor(6000);
+await clockPage.waitForTimeout(2000);
+
+await clockPage.getByText('Where are you going?').click();
+await clockPage.locator('input[placeholder="Where to?"]').fill('Dhiraagu');
+await clockPage.clock.runFor(1600);
+await clockPage.waitForTimeout(1200);
+await clockPage.locator('button').filter({ hasText: '133 · 125 · 126' }).first().click();
+await clockPage.clock.runFor(4000);
+await clockPage.waitForTimeout(2500);
+
+const departures = async () =>
+  ((await clockPage.locator('body').innerText()).match(/\d{2}:\d{2} – \d{2}:\d{2}/g) ?? []).join();
+
+const atFirstSight = await departures();
+check(atFirstSight.length > 0, `itineraries planned at 13:55 (${atFirstSight || 'none'})`);
+
+await clockPage.clock.runFor(60_000);
+await clockPage.waitForTimeout(400);
+const aMinuteLater = await departures();
+check(
+  aMinuteLater !== atFirstSight,
+  `results follow the clock (13:55 "${atFirstSight}" -> 13:56 "${aMinuteLater}")`,
+);
+await clockCtx.close();
+
 await browser.close();
 console.log(failures.length === 0 ? '\nAll checks passed.' : `\n${failures.length} failed.`);
 process.exit(failures.length === 0 ? 0 : 1);

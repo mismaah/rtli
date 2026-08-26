@@ -44,6 +44,10 @@ export function StopDetail({ stop, graph, onClose, onRouteFrom, onRouteTo }: Pro
     },
     enabled: visible,
     refetchInterval: visible ? POLL_MS : false,
+    // Overrides the app-wide default: timers are throttled or stopped while the
+    // phone is asleep, so the arrivals on screen when it wakes are however old
+    // the nap was until this refetches them.
+    refetchOnWindowFocus: true,
     staleTime: 0,
   });
 
