@@ -78,6 +78,11 @@ export interface WalkLeg {
   to: Place;
   meters: number;
   seconds: number;
+  /**
+   * `[lng, lat]` along the real footpath, when one has been routed. Its absence
+   * means `meters` is still the planner's straight-line-plus-detour estimate.
+   */
+  path?: [number, number][];
 }
 
 export interface BusLeg {

@@ -42,10 +42,12 @@ import {
   samePlace,
 } from '@/lib/transit/places';
 import { readUrlState, toQueryString, writeUrlState } from '@/lib/urlState';
+import { applyWalkPaths, walkLineOf, walkPathKey } from '@/lib/transit/walkPaths';
 import { useRecentTrips } from '@/store/recentTrips';
 import type { LiveBus } from '@/api/rtl';
 import type { RouteDetailsResponse } from '@/api/rtl';
-import type { BusLeg, Itinerary, Place } from '@/lib/transit/types';
+import type { BusLeg, Itinerary, Place, WalkLeg } from '@/lib/transit/types';
+import type { WalkPath } from '@/api/walking';
 
 const graph = buildGraph(fixture as unknown as RouteDetailsResponse);
 
@@ -799,5 +801,107 @@ describe('recent trips', () => {
     record(stopPlace('106'), stopPlace('201'));
 
     expect(useRecentTrips.getState().trips).toHaveLength(2);
+  });
+});
+
+describe('walking paths', () => {
+  const noon = parseClock('12:00')!;
+
+  /** A trip that starts with a walk: 300 m north of the Maafannu terminal. */
+  function tripWithLeadingWalk(): Itinerary {
+    const terminal = stopPlace('103');
+    const from: Place = { name: 'Up the road', lat: terminal.lat + 0.0027, lng: terminal.lng };
+    const results = planJourney(graph, from, stopPlace('114'), { departAt: noon });
+    const trip = results.find((it) => it.legs[0]?.kind === 'walk');
+    if (!trip) throw new Error('fixture no longer produces a trip that starts on foot');
+    return trip;
+  }
+
+  function pathFor(leg: WalkLeg, meters: number): [string, WalkPath] {
+    return [
+      walkPathKey(leg.from, leg.to),
+      {
+        meters,
+        coordinates: [
+          [leg.from.lng, leg.from.lat],
+          [leg.from.lng, leg.to.lat],
+          [leg.to.lng, leg.to.lat],
+        ],
+      },
+    ];
+  }
+
+  it('keys a walk by its ends, rounded so a metre of GPS drift reuses the answer', () => {
+    const a = { lat: 4.1755, lng: 73.5093 };
+    const b = { lat: 4.179, lng: 73.5165 };
+    expect(walkPathKey(a, b)).toBe(walkPathKey({ lat: a.lat + 0.000004, lng: a.lng }, b));
+    // Direction matters: the way there can differ from the way back.
+    expect(walkPathKey(a, b)).not.toBe(walkPathKey(b, a));
+  });
+
+  it('measures a walk along its real path instead of the crow flies', () => {
+    const trip = tripWithLeadingWalk();
+    const walk = trip.legs[0] as WalkLeg;
+    const routedM = walk.meters + 180;
+
+    const walked = applyWalkPaths(trip, new Map([pathFor(walk, routedM)]));
+    const after = walked.legs[0] as WalkLeg;
+
+    expect(after.meters).toBeCloseTo(routedM, 5);
+    expect(after.seconds).toBeGreaterThan(walk.seconds);
+    expect(after.path).toHaveLength(3);
+    expect(walked.totalWalkM).toBeCloseTo(trip.totalWalkM + 180, 5);
+  });
+
+  it('leaves earlier when the real path is longer, without moving the bus', () => {
+    const trip = tripWithLeadingWalk();
+    const walk = trip.legs[0] as WalkLeg;
+    const bus = trip.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+    const walked = applyWalkPaths(trip, new Map([pathFor(walk, walk.meters + 300)]));
+    const busAfter = walked.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+    expect(busAfter.departAt).toBe(bus.departAt);
+    expect(walked.departAt).toBeLessThan(trip.departAt);
+    expect(walked.arriveAt).toBe(trip.arriveAt);
+  });
+
+  it('keeps the itinerary it was given when nothing was routed', () => {
+    const trip = tripWithLeadingWalk();
+    expect(applyWalkPaths(trip, new Map())).toBe(trip);
+    // A path for some other pair of points is not this trip's path.
+    const elsewhere: Map<string, WalkPath> = new Map([
+      [walkPathKey({ lat: 4.2, lng: 73.55 }, { lat: 4.21, lng: 73.56 }), { meters: 400, coordinates: [] }],
+    ]);
+    expect(applyWalkPaths(trip, elsewhere)).toBe(trip);
+  });
+
+  it('draws the direct line for a walk that has not been routed yet', () => {
+    const trip = tripWithLeadingWalk();
+    const walk = trip.legs[0] as WalkLeg;
+    expect(walkLineOf(walk)).toEqual([
+      [walk.from.lng, walk.from.lat],
+      [walk.to.lng, walk.to.lat],
+    ]);
+
+    const walked = applyWalkPaths(trip, new Map([pathFor(walk, walk.meters)]));
+    expect(walkLineOf(walked.legs[0] as WalkLeg)).toHaveLength(3);
+  });
+
+  it('leaves the itinerary it measured untouched', () => {
+    // A shared link, and the lookup that re-finds this trip in the next plan,
+    // both key off `itinerarySignature`, which counts the metres walked. The
+    // routed copy is therefore a copy: refine the original in place and every
+    // link to the trip would stop resolving to it.
+    const trip = tripWithLeadingWalk();
+    const walk = trip.legs[0] as WalkLeg;
+    const before = itinerarySignature(trip);
+
+    const walked = applyWalkPaths(trip, new Map([pathFor(walk, walk.meters + 250)]));
+
+    expect(itinerarySignature(trip)).toBe(before);
+    expect((trip.legs[0] as WalkLeg).path).toBeUndefined();
+    expect(walked.legs[0]).not.toBe(trip.legs[0]);
+    expect(walked.id).toBe(trip.id);
   });
 });

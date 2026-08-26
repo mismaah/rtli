@@ -7,6 +7,7 @@ import { MapPadding } from '@/components/map/MapPadding';
 import { StopMarkers } from '@/components/map/StopMarkers';
 import { RouteShapeLayer } from '@/components/map/RouteShapeLayer';
 import { BusMarkers } from '@/components/map/BusMarkers';
+import { WalkRouteLayer } from '@/components/map/WalkRouteLayer';
 import { UserMarker } from '@/components/map/UserMarker';
 import { EndpointMarkers } from '@/components/map/EndpointMarkers';
 import { Home } from '@/screens/Home';
@@ -19,10 +20,12 @@ import { useGeolocation } from '@/hooks/useGeolocation';
 import { usePlan } from '@/hooks/usePlan';
 import { useOnline } from '@/hooks/useOnline';
 import { useWideLayout } from '@/hooks/useWideLayout';
+import { useWalkPaths } from '@/hooks/useWalkPaths';
 import { useSavedPlaces } from '@/store/savedPlaces';
 import { useRecentTrips } from '@/store/recentTrips';
 import { boundsOf } from '@/lib/geo';
 import { itinerarySignature } from '@/lib/transit/plan';
+import { applyWalkPaths, walkLineOf } from '@/lib/transit/walkPaths';
 import {
   encodePlace,
   isUnresolvable,
@@ -31,7 +34,7 @@ import {
   type PlaceRef,
 } from '@/lib/transit/places';
 import { readUrlState, writeUrlState } from '@/lib/urlState';
-import type { Itinerary, Place, Stop } from '@/lib/transit/types';
+import type { Itinerary, Place, Stop, WalkLeg } from '@/lib/transit/types';
 
 type View = 'home' | 'results' | 'detail' | 'stop' | 'saved';
 type Searching = 'origin' | 'destination' | 'save' | null;
@@ -189,6 +192,25 @@ export default function App() {
     return itineraries.find((it) => itinerarySignature(it) === signature) ?? selected;
   }, [selected, itineraries]);
 
+  /**
+   * The journey as drawn and quoted, with its walks measured along real
+   * footpaths instead of the crow flies.
+   *
+   * Only the opened trip is routed: the planner's estimate is what ranks the
+   * options, and asking a shared public router about every walk in every
+   * candidate would be both slow and rude. Until the answers land — or if they
+   * never do, offline — this is the estimate, unchanged.
+   */
+  const detail = useMemo(
+    () => (view === 'detail' ? activeSelection : null),
+    [view, activeSelection],
+  );
+  const { paths: walkPaths } = useWalkPaths(detail);
+  const walkedDetail = useMemo(
+    () => (detail ? applyWalkPaths(detail, walkPaths) : null),
+    [detail, walkPaths],
+  );
+
   const handlePick = useCallback(
     (place: Place) => {
       if (searching === 'origin') chooseOrigin(place);
@@ -242,7 +264,8 @@ export default function App() {
             shownRoutes.map((route) => (
               <BusMarkers key={route.code} route={route} />
             ))}
-          <FitBounds view={view} selected={selected} origin={origin} destination={destination} />
+          {walkedDetail && <WalkRouteLayer itinerary={walkedDetail} />}
+          <FitBounds selected={walkedDetail} origin={origin} destination={destination} />
         </LazyMap>
 
         <header
@@ -303,7 +326,7 @@ export default function App() {
 
         {graph && view === 'detail' && selected && (
           <TripDetail
-            itinerary={activeSelection ?? selected}
+            itinerary={walkedDetail ?? selected}
             liveApplied={liveApplied}
             onBack={() => {
               setSelected(null);
@@ -361,46 +384,52 @@ function encodeRef(ref: PlaceRef | null): string | undefined {
 
 /** Keeps the visible map framed on whatever the sheet is currently showing. */
 function FitBounds({
-  view,
   selected,
   origin,
   destination,
 }: {
-  view: View;
   selected: Itinerary | null;
   origin: Place | null;
   destination: Place | null;
 }) {
   const points = useMemo(() => {
-    if (view === 'detail' && selected) {
+    if (selected) {
       return selected.legs.flatMap((l) =>
         l.kind === 'bus'
           ? [
               { lat: l.boardStop.lat, lng: l.boardStop.lng },
               { lat: l.alightStop.lat, lng: l.alightStop.lng },
             ]
-          : [
-              { lat: l.from.lat, lng: l.from.lng },
-              { lat: l.to.lat, lng: l.to.lng },
-            ],
+          : // The whole footpath, not just its ends: a walk around a block leaves
+            // the box its endpoints describe, and half of it would be off screen.
+            walkLineOf(l as WalkLeg).map(([lng, lat]) => ({ lat, lng })),
       );
     }
     if (origin && destination) return [origin, destination];
     return [];
-  }, [view, selected, origin, destination]);
+  }, [selected, origin, destination]);
 
   return <FitBoundsInner points={points} />;
 }
 
+const NOWHERE: [[number, number], [number, number]] = [
+  [0, 0],
+  [0, 0],
+];
+
 function FitBoundsInner({ points }: { points: { lat: number; lng: number }[] }) {
   const map = useMap();
+  const bounds = useMemo(() => boundsOf(points), [points]);
+  const [[west, south], [east, north]] = bounds ?? NOWHERE;
 
+  // Keyed on the box rather than on the array that produced it: the plan is
+  // rebuilt every time live times land, and re-fitting the map each minute would
+  // yank it out from under a rider who had panned somewhere else.
   useEffect(() => {
-    const bounds = boundsOf(points);
     if (!bounds) return;
     // Padding is supplied by <MapPadding>, which tracks the sheet's snap point.
     map.fitBounds(bounds, { maxZoom: 16, duration: 500 });
-  }, [map, points]);
+  }, [map, west, south, east, north]);
 
   return null;
 }

@@ -131,7 +131,7 @@ export function planJourney(
   const directWalkM = walkMeters(origin, destination);
   if (directWalkM <= maxWalkM) {
     candidates.push(
-      finalize(
+      finalizeItinerary(
         [
           {
             kind: 'walk',
@@ -230,7 +230,7 @@ export function planJourney(
       });
     }
 
-    const itinerary = finalize(legs, `${label.round}-${label.stopCode}`);
+    const itinerary = finalizeItinerary(legs, `${label.round}-${label.stopCode}`);
     if (itinerary.totalWalkM > maxTotalWalkM) continue;
     candidates.push(itinerary);
   }
@@ -499,7 +499,15 @@ function placeOf(stop: Stop): Place {
   return { name: stop.name, lat: stop.lat, lng: stop.lng, stopCode: stop.code };
 }
 
-function finalize(legs: Leg[], id: string): Itinerary {
+/**
+ * Totals and door-to-door times, derived from the legs alone.
+ *
+ * Exported because a walking path routed after the fact changes a walk leg's
+ * distance and duration, and everything an itinerary reports about itself —
+ * when to leave, when you arrive, how far you walk — has to be recomputed from
+ * the legs it now has rather than patched.
+ */
+export function finalizeItinerary(legs: Leg[], id: string): Itinerary {
   const busLegs = legs.filter((l): l is BusLeg => l.kind === 'bus');
   const walkLegs = legs.filter((l): l is WalkLeg => l.kind === 'walk');
 
