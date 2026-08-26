@@ -30,6 +30,20 @@ export const MAX_SPEED_MPS = 30;
 /** No movement for this long reads as waiting at a stop or parked up. */
 export const STOPPED_AFTER_MS = 45_000;
 
+/**
+ * How much of a bus's recent path is kept behind it. Twelve confirmed moves is
+ * a couple of minutes of city driving — enough for the trail to show which way
+ * the bus came without drawing its entire shift across the map.
+ */
+export const TRAIL_MAX_POINTS = 12;
+/** A trail older than this is history, not movement, and stops being drawn. */
+export const TRAIL_MAX_AGE_MS = 4 * 60_000;
+
+export interface TrailPoint extends LatLng {
+  /** Epoch ms the bus was seen here. */
+  at: number;
+}
+
 export interface BusTrack extends LatLng {
   busCode: string;
   plateNumber: string;
@@ -46,6 +60,12 @@ export interface BusTrack extends LatLng {
   /** Position the current heading was measured from. */
   anchor: LatLng;
   anchorAt: number;
+  /**
+   * Where the bus has been, oldest first, excluding where it is now. Only
+   * positions it demonstrably reached are kept — the same movement threshold
+   * that gates the heading — so a parked bus leaves no smear of jitter behind it.
+   */
+  trail: TrailPoint[];
 }
 
 /**
@@ -80,6 +100,7 @@ export function updateTracks(
         firstSeenAt: now,
         anchor: position,
         anchorAt: now,
+        trail: [],
       });
       continue;
     }
@@ -95,6 +116,7 @@ export function updateTracks(
         ...position,
         plateNumber: bus.plateNumber || prior.plateNumber,
         updatedAt: now,
+        trail: prune(prior.trail, now),
       });
       continue;
     }
@@ -115,10 +137,21 @@ export function updateTracks(
       firstSeenAt: prior.firstSeenAt,
       anchor: position,
       anchorAt: now,
+      // A jump the feed cannot account for is not a path the bus drove, so the
+      // trail restarts from where it reappeared rather than drawing the leap.
+      trail: trustworthy
+        ? prune([...prior.trail, { ...prior.anchor, at: prior.anchorAt }], now)
+        : [],
     });
   }
 
   return next;
+}
+
+/** Drops trail points that have aged out, then the oldest beyond the cap. */
+function prune(trail: TrailPoint[], now: number): TrailPoint[] {
+  const fresh = trail.filter((p) => now - p.at <= TRAIL_MAX_AGE_MS);
+  return fresh.length > TRAIL_MAX_POINTS ? fresh.slice(fresh.length - TRAIL_MAX_POINTS) : fresh;
 }
 
 /** True while the bus has not cleared the jitter radius for a while. */

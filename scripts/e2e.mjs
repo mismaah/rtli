@@ -200,6 +200,73 @@ check(
 );
 await liveCtx.close();
 
+// A trip is state, not a session: the address bar carries it, so a refresh comes
+// back to it and the link works on somebody else's phone. The same params are
+// what let the offline reload above land where it left off.
+const linkCtx = await browser.newContext({
+  viewport: { width: 390, height: 844 },
+  isMobile: true,
+  hasTouch: true,
+  geolocation: { latitude: 4.1755, longitude: 73.5093 },
+  permissions: ['geolocation'],
+});
+const linkPage = await linkCtx.newPage();
+
+const planTo = async (page, destination) => {
+  await page.getByText('Where are you going?').click();
+  await page.locator('input[placeholder="Where to?"]').fill(destination);
+  await page.waitForTimeout(1600);
+  await page.locator('button').filter({ hasText: '133 · 125 · 126' }).first().click();
+  await page.waitForTimeout(6000);
+};
+
+await linkPage.goto(URL, { waitUntil: 'networkidle', timeout: 45_000 });
+await linkPage.waitForTimeout(6000);
+await planTo(linkPage, 'Dhiraagu');
+
+// `URL` is taken by the base address above, so these read the query directly.
+const query = (href) => href.split('?')[1] ?? '';
+const planned = query(linkPage.url());
+check(
+  /(^|&)from=me(&|$)/.test(planned) && /(^|&)to=stop:/.test(planned),
+  `the trip is in the address bar (${planned || 'no params'})`,
+);
+
+await linkPage.locator('button').filter({ hasText: /transfer|Direct/ }).first().click();
+await linkPage.waitForTimeout(3000);
+const shared = linkPage.url();
+check(/(^|&)route=/.test(query(shared)), `the chosen trip is too (${query(shared) || 'no params'})`);
+
+const guestCtx = await browser.newContext({
+  viewport: { width: 390, height: 844 },
+  isMobile: true,
+  hasTouch: true,
+  geolocation: { latitude: 4.1755, longitude: 73.5093 },
+  permissions: ['geolocation'],
+});
+const guestPage = await guestCtx.newPage();
+await guestPage.goto(shared, { waitUntil: 'networkidle', timeout: 45_000 });
+await guestPage.waitForTimeout(10_000);
+const guestText = await guestPage.locator('body').innerText();
+check(
+  /All options/.test(guestText) && /BOARD/.test(guestText) && /GET OFF/.test(guestText),
+  'a shared link opens the same trip on a device that has never seen it',
+);
+await guestCtx.close();
+
+// The rider is somewhere else every time they open the app, and the same journey
+// used to be filed under recents once per fix.
+await linkPage.goto(URL.split('?')[0], { waitUntil: 'domcontentloaded' });
+await linkPage.waitForTimeout(7000);
+await linkCtx.setGeolocation({ latitude: 4.1912, longitude: 73.5389 });
+await planTo(linkPage, 'Dhiraagu');
+
+await linkPage.goto(URL.split('?')[0], { waitUntil: 'domcontentloaded' });
+await linkPage.waitForTimeout(7000);
+const recents = await linkPage.locator('button').filter({ hasText: 'from My location' }).count();
+check(recents === 1, `the same trip is listed once under recents (${recents})`);
+await linkCtx.close();
+
 // Results must follow the clock. A rider who opens the app at 13:55 and waits
 // for the 14:00 bus is the ordinary case, and the plan used to be computed once
 // at mount — so 14:00 came and went with the departed bus still top of the list.

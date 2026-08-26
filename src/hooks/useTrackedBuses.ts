@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { updateTracks, type BusTrack } from '@/lib/transit/busTracks';
+import { polylinesOf, snapToRoute } from '@/lib/transit/snapToRoute';
+import { useRoadShape } from './useRoadShape';
 import { useLiveBuses } from './useLiveBuses';
 
 export interface TrackedBuses {
@@ -9,7 +11,12 @@ export interface TrackedBuses {
 }
 
 /**
- * Live buses for one route, carrying their inferred heading and speed.
+ * Live buses for one route, corrected onto that route and carrying their
+ * inferred heading and speed.
+ *
+ * The correction happens here, before any inference: a position pulled back onto
+ * the road is also a steadier one, so the heading taken from it stops swinging
+ * with the fix. See `snapToRoute` for how far a bus is allowed to be moved.
  *
  * The tracks live in a ref rather than in query state because they are history:
  * each poll is folded into what came before, and react-query only ever hands back
@@ -17,9 +24,22 @@ export interface TrackedBuses {
  */
 export function useTrackedBuses(routeCode: string | null): TrackedBuses {
   const { data, dataUpdatedAt } = useLiveBuses(routeCode);
+  // The same query the route's shape layer draws from, so this costs no fetch.
+  const { data: shape } = useRoadShape(routeCode);
   const history = useRef(new Map<string, BusTrack>());
   const trackedRoute = useRef(routeCode);
   const [tracks, setTracks] = useState<BusTrack[]>([]);
+
+  const lines = useMemo(() => polylinesOf(shape), [shape]);
+
+  const corrected = useMemo(() => {
+    if (!data || lines.length === 0) return data;
+    return data.map((bus) => {
+      if (!Number.isFinite(bus.latitude) || !Number.isFinite(bus.longitude)) return bus;
+      const snapped = snapToRoute({ lat: bus.latitude, lng: bus.longitude }, lines);
+      return { ...bus, latitude: snapped.lat, longitude: snapped.lng };
+    });
+  }, [data, lines]);
 
   useEffect(() => {
     if (trackedRoute.current !== routeCode) {
@@ -28,11 +48,11 @@ export function useTrackedBuses(routeCode: string | null): TrackedBuses {
       history.current = new Map();
       setTracks([]);
     }
-    if (!data) return;
+    if (!corrected) return;
 
-    history.current = updateTracks(history.current, data, dataUpdatedAt || Date.now());
+    history.current = updateTracks(history.current, corrected, dataUpdatedAt || Date.now());
     setTracks([...history.current.values()]);
-  }, [routeCode, data, dataUpdatedAt]);
+  }, [routeCode, corrected, dataUpdatedAt]);
 
   return { tracks, updatedAt: dataUpdatedAt };
 }

@@ -58,6 +58,11 @@ export interface Place extends LatLng {
   name: string;
   /** Present when this place is a bus stop rather than an arbitrary point. */
   stopCode?: StopCode;
+  /**
+   * True when this is the rider's own position rather than a fixed point, so
+   * the coordinates are a reading rather than an identity.
+   */
+  current?: boolean;
 }
 
 export interface LiveEta {

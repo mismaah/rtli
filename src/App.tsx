@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BottomSheet, type SheetSnap } from '@/components/BottomSheet';
 import { SearchSheet } from '@/components/SearchSheet';
 import { LazyMap } from '@/components/map/LazyMap';
@@ -23,6 +23,14 @@ import { useSavedPlaces } from '@/store/savedPlaces';
 import { useRecentTrips } from '@/store/recentTrips';
 import { boundsOf } from '@/lib/geo';
 import { itinerarySignature } from '@/lib/transit/plan';
+import {
+  encodePlace,
+  isUnresolvable,
+  parsePlaceRef,
+  resolvePlaceRef,
+  type PlaceRef,
+} from '@/lib/transit/places';
+import { readUrlState, writeUrlState } from '@/lib/urlState';
 import type { Itinerary, Place, Stop } from '@/lib/transit/types';
 
 type View = 'home' | 'results' | 'detail' | 'stop' | 'saved';
@@ -47,12 +55,54 @@ export default function App() {
   const savedPlaces = useSavedPlaces((s) => s.places);
   const recordTrip = useRecentTrips((s) => s.record);
 
-  // The rider's current position is the natural starting point.
+  /**
+   * What this load was asked for, before anything is known.
+   *
+   * A shared link names places by stop code or by `me`, neither of which can be
+   * turned into a point until the timetable has loaded or the browser has
+   * answered with a fix — so the request is held here and honoured when its
+   * ingredients turn up. With no link, the origin defaults to the rider's own
+   * position, which is the natural starting point.
+   */
+  const initialUrl = useMemo(() => readUrlState(), []);
+  const pendingFrom = useRef<PlaceRef | null>(
+    parsePlaceRef(initialUrl.from) ?? { kind: 'current' },
+  );
+  const pendingTo = useRef<PlaceRef | null>(parsePlaceRef(initialUrl.to));
+  const pendingRoute = useRef<string | null>(initialUrl.route ?? null);
+
+  const locationRefused = geo.status === 'denied' || geo.status === 'unavailable';
+
   useEffect(() => {
-    if (geo.position && !origin) {
-      setOrigin({ name: 'My location', lat: geo.position.lat, lng: geo.position.lng });
-    }
-  }, [geo.position, origin]);
+    const settle = (ref: PlaceRef | null, apply: (place: Place) => void) => {
+      if (!ref) return ref;
+      const place = resolvePlaceRef(ref, graph, geo.position);
+      if (place) {
+        apply(place);
+        return null;
+      }
+      // Give up on what can never arrive, so the URL stops claiming it.
+      const hopeless = isUnresolvable(ref, graph) || (ref.kind === 'current' && locationRefused);
+      return hopeless ? null : ref;
+    };
+
+    pendingFrom.current = settle(pendingFrom.current, setOrigin);
+    pendingTo.current = settle(pendingTo.current, setDestination);
+  }, [graph, geo.position, locationRefused]);
+
+  /**
+   * Picking a place by hand settles that end of the trip for good; without this
+   * a slow location fix would land a moment later and overwrite the choice.
+   */
+  const chooseOrigin = useCallback((place: Place) => {
+    pendingFrom.current = null;
+    setOrigin(place);
+  }, []);
+
+  const chooseDestination = useCallback((place: Place) => {
+    pendingTo.current = null;
+    setDestination(place);
+  }, []);
 
   const { itineraries, liveApplied } = usePlan(graph, origin, destination);
 
@@ -63,6 +113,45 @@ export default function App() {
       recordTrip(origin, destination);
     }
   }, [origin, destination, recordTrip]);
+
+  /**
+   * Opens the trip a shared link points at, once the plan that contains it has
+   * been worked out. Declared after the effect above so that on a link carrying
+   * a route the detail screen, not the results list, is what settles.
+   *
+   * One shot, and dropped as soon as any plan exists: a bus that has since left
+   * takes its itinerary out of the results, and a link that missed its trip
+   * should leave the rider on the list rather than ambushing them with a detail
+   * screen minutes later when a matching departure comes round again.
+   */
+  useEffect(() => {
+    const signature = pendingRoute.current;
+    if (!signature || itineraries.length === 0) return;
+    pendingRoute.current = null;
+
+    const match = itineraries.find((it) => itinerarySignature(it) === signature);
+    if (!match) return;
+    setSelected(match);
+    setView('detail');
+    setSnap('half');
+  }, [itineraries]);
+
+  /**
+   * Mirrors the trip into the address bar, so a refresh comes back to it and a
+   * copied link takes someone else there. Requests still waiting on the graph or
+   * on a location fix are written back as they came in, so a reload during those
+   * first seconds does not lose them.
+   */
+  useEffect(() => {
+    writeUrlState({
+      from: origin ? encodePlace(origin) : encodeRef(pendingFrom.current),
+      to: destination ? encodePlace(destination) : encodeRef(pendingTo.current),
+      route:
+        view === 'detail' && selected
+          ? itinerarySignature(selected)
+          : (pendingRoute.current ?? undefined),
+    });
+  }, [origin, destination, selected, view]);
 
   const stops = useMemo(() => (graph ? [...graph.stops.values()] : []), [graph]);
 
@@ -102,12 +191,12 @@ export default function App() {
 
   const handlePick = useCallback(
     (place: Place) => {
-      if (searching === 'origin') setOrigin(place);
-      else if (searching === 'destination') setDestination(place);
+      if (searching === 'origin') chooseOrigin(place);
+      else if (searching === 'destination') chooseDestination(place);
       else if (searching === 'save') addSaved(place);
       setSearching(null);
     },
-    [searching, addSaved],
+    [searching, addSaved, chooseOrigin, chooseDestination],
   );
 
   const handleStopSelect = useCallback(
@@ -186,9 +275,10 @@ export default function App() {
             onEditOrigin={() => setSearching('origin')}
             onEditDestination={() => setSearching('destination')}
             onPickRecent={(o, d) => {
-              setOrigin(o);
-              setDestination(d);
+              chooseOrigin(o);
+              chooseDestination(d);
             }}
+            onPickSaved={chooseDestination}
             onManageSaved={() => setView('saved')}
           />
         )}
@@ -228,11 +318,11 @@ export default function App() {
             graph={graph}
             onClose={() => setView(destination ? 'results' : 'home')}
             onRouteFrom={(s) => {
-              setOrigin({ name: s.name, lat: s.lat, lng: s.lng, stopCode: s.code });
+              chooseOrigin({ name: s.name, lat: s.lat, lng: s.lng, stopCode: s.code });
               setView(destination ? 'results' : 'home');
             }}
             onRouteTo={(s) => {
-              setDestination({ name: s.name, lat: s.lat, lng: s.lng, stopCode: s.code });
+              chooseDestination({ name: s.name, lat: s.lat, lng: s.lng, stopCode: s.code });
             }}
           />
         )}
@@ -259,6 +349,14 @@ export default function App() {
       )}
     </div>
   );
+}
+
+/** A place request that has not resolved yet, written back as the URL had it. */
+function encodeRef(ref: PlaceRef | null): string | undefined {
+  if (!ref) return undefined;
+  if (ref.kind === 'current') return 'me';
+  if (ref.kind === 'stop') return `stop:${ref.code}`;
+  return encodePlace(ref.place);
 }
 
 /** Keeps the visible map framed on whatever the sheet is currently showing. */

@@ -11,6 +11,7 @@ interface Props {
   onEditOrigin: () => void;
   onEditDestination: () => void;
   onPickRecent: (origin: Place, destination: Place) => void;
+  onPickSaved: (destination: Place) => void;
   onManageSaved: () => void;
 }
 
@@ -22,6 +23,7 @@ export function Home({
   onEditOrigin,
   onEditDestination,
   onPickRecent,
+  onPickSaved,
   onManageSaved,
 }: Props) {
   const saved = useSavedPlaces((s) => s.places);
@@ -77,7 +79,10 @@ export function Home({
               <button
                 key={p.id}
                 type="button"
-                onClick={() => onPickRecent(origin ?? p, p)}
+                // A saved place is somewhere to go, never both ends of a trip:
+                // tapping one before a start point exists used to plan a journey
+                // from the place to itself, and file it under recents.
+                onClick={() => onPickSaved(p)}
                 className="flex min-h-16 w-24 shrink-0 flex-col items-center justify-center gap-1 rounded-xl border border-white/10 bg-ink-800/70 px-2 py-2 active:bg-ink-700/70"
               >
                 <span className="text-xl">{p.icon}</span>

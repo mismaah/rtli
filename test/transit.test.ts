@@ -18,7 +18,31 @@ import {
   msUntilNextMinute,
 } from '@/lib/time';
 import { haversineMeters, bearingDegrees, compassPoint } from '@/lib/geo';
-import { updateTracks, isStopped, MIN_MOVE_M, MAX_GAP_MS } from '@/lib/transit/busTracks';
+import {
+  updateTracks,
+  isStopped,
+  MIN_MOVE_M,
+  MAX_GAP_MS,
+  TRAIL_MAX_AGE_MS,
+  TRAIL_MAX_POINTS,
+} from '@/lib/transit/busTracks';
+import {
+  FULL_SNAP_M,
+  NO_SNAP_M,
+  nearestOnPath,
+  polylinesOf,
+  snapToRoute,
+} from '@/lib/transit/snapToRoute';
+import {
+  currentLocation,
+  encodePlace,
+  parsePlaceRef,
+  placeKey,
+  resolvePlaceRef,
+  samePlace,
+} from '@/lib/transit/places';
+import { readUrlState, toQueryString, writeUrlState } from '@/lib/urlState';
+import { useRecentTrips } from '@/store/recentTrips';
 import type { LiveBus } from '@/api/rtl';
 import type { RouteDetailsResponse } from '@/api/rtl';
 import type { BusLeg, Itinerary, Place } from '@/lib/transit/types';
@@ -563,5 +587,217 @@ describe('bus tracks', () => {
     expect(formatAgo(12_000)).toBe('12s ago');
     expect(formatAgo(120_000)).toBe('2 min ago');
     expect(formatAgo(7_200_000)).toBe('2 hr ago');
+  });
+});
+
+describe('bus trails', () => {
+  const START = 1_000_000;
+  const bus = (lat: number, lng = 73.5093): LiveBus[] => [
+    { busCode: 'B1', plateNumber: 'A0A0000', latitude: lat, longitude: lng },
+  ];
+
+  it('starts empty and grows only where the bus was confirmed to have been', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    expect(tracks.get('B1')!.trail).toEqual([]);
+
+    tracks = updateTracks(tracks, bus(4.1764), START + 10_000);
+    tracks = updateTracks(tracks, bus(4.1773), START + 20_000);
+
+    const trail = tracks.get('B1')!.trail;
+    expect(trail.map((p) => p.lat)).toEqual([4.1755, 4.1764]);
+    // Oldest first, so the drawn line ends at where the bus is now.
+    expect(trail[0].at).toBeLessThan(trail[1].at);
+  });
+
+  it('leaves no smear behind a parked bus', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, bus(4.17553), START + 10_000);
+    tracks = updateTracks(tracks, bus(4.17551), START + 20_000);
+
+    expect(tracks.get('B1')!.trail).toEqual([]);
+  });
+
+  it('restarts rather than drawing a line across an unexplained jump', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, bus(4.1764), START + 10_000);
+    expect(tracks.get('B1')!.trail).toHaveLength(1);
+
+    tracks = updateTracks(tracks, bus(4.2764), START + 20_000);
+    expect(tracks.get('B1')!.trail).toEqual([]);
+  });
+
+  it('keeps the trail short and recent', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    for (let i = 1; i <= TRAIL_MAX_POINTS + 5; i++) {
+      tracks = updateTracks(tracks, bus(4.1755 + i * 0.0009), START + i * 10_000);
+    }
+    expect(tracks.get('B1')!.trail).toHaveLength(TRAIL_MAX_POINTS);
+
+    const later = START + TRAIL_MAX_AGE_MS + 10 * 60_000;
+    tracks = updateTracks(tracks, bus(4.3), later);
+    tracks = updateTracks(tracks, bus(4.3009), later + 10_000);
+    expect(tracks.get('B1')!.trail).toHaveLength(1);
+  });
+});
+
+describe('snapping buses onto their route', () => {
+  // A straight north-south line; at this latitude 0.0001° of longitude is ~11 m.
+  const line: [number, number][] = [
+    [73.5, 4.17],
+    [73.5, 4.19],
+  ];
+  const east = (meters: number) => ({ lat: 4.18, lng: 73.5 + meters / 111_320 / Math.cos((4.18 * Math.PI) / 180) });
+
+  it('reads LineString and MultiLineString road shapes alike', () => {
+    const shape = {
+      type: 'FeatureCollection',
+      features: [
+        { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: line } },
+        {
+          type: 'Feature',
+          properties: {},
+          geometry: { type: 'MultiLineString', coordinates: [line, line] },
+        },
+        { type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: line[0] } },
+      ],
+    } as unknown as GeoJSON.FeatureCollection;
+
+    expect(polylinesOf(shape)).toHaveLength(3);
+    expect(polylinesOf(null)).toEqual([]);
+  });
+
+  it('measures the distance to the nearest point on the line', () => {
+    const nearest = nearestOnPath(east(25), [line])!;
+    expect(nearest.offsetM).toBeCloseTo(25, 0);
+    expect(nearest.lng).toBeCloseTo(73.5, 5);
+    expect(nearest.lat).toBeCloseTo(4.18, 5);
+  });
+
+  it('clamps to the end of the line rather than running off it', () => {
+    const beyond = nearestOnPath({ lat: 4.2, lng: 73.5 }, [line])!;
+    expect(beyond.lat).toBeCloseTo(4.19, 5);
+  });
+
+  it('puts a bus a few metres out back on the road', () => {
+    const snapped = snapToRoute(east(20), [line]);
+    expect(snapped.lng).toBeCloseTo(73.5, 5);
+    expect(snapped.offsetM).toBeCloseTo(20, 0);
+    expect(snapped.movedM).toBeCloseTo(20, 0);
+  });
+
+  it('only eases a bus that is further out, and leaves a distant one alone', () => {
+    const halfway = snapToRoute(east((FULL_SNAP_M + NO_SNAP_M) / 2), [line]);
+    // Half the correction applied: 80 m out, moved 40, still 40 m off the line.
+    expect(halfway.movedM).toBeCloseTo(40, 0);
+    expect(nearestOnPath(halfway, [line])!.offsetM).toBeCloseTo(40, 0);
+
+    const far = east(NO_SNAP_M + 200);
+    const untouched = snapToRoute(far, [line]);
+    expect(untouched.movedM).toBe(0);
+    expect(untouched.lng).toBe(far.lng);
+  });
+
+  it('leaves the position alone when the route has no geometry yet', () => {
+    const reported = east(500);
+    expect(snapToRoute(reported, [])).toMatchObject({ lat: reported.lat, lng: reported.lng, movedM: 0 });
+  });
+});
+
+describe('place identity', () => {
+  const here = { lat: 4.1755, lng: 73.5093 };
+
+  it('treats every reading of "my location" as the same place', () => {
+    const morning = currentLocation(here);
+    const afternoon = currentLocation({ lat: 4.1801, lng: 73.5121 });
+    expect(placeKey(morning)).toBe('me');
+    expect(samePlace(morning, afternoon)).toBe(true);
+  });
+
+  it('keys stops by code, and everything else by rounded coordinates', () => {
+    expect(placeKey(stopPlace('201'))).toBe('stop:201');
+    const a: Place = { name: 'Rasfannu', lat: 4.17553, lng: 73.50931 };
+    const b: Place = { name: 'Rasfannu beach', lat: 4.175531, lng: 73.509314 };
+    expect(samePlace(a, b)).toBe(true);
+    expect(samePlace(a, { ...a, lat: 4.19 })).toBe(false);
+  });
+
+  it('round-trips a place through the URL', () => {
+    for (const place of [currentLocation(here), stopPlace('201'), { name: 'Ha, there', ...here }]) {
+      const ref = parsePlaceRef(encodePlace(place))!;
+      const resolved = resolvePlaceRef(ref, graph, here)!;
+      expect(samePlace(resolved, place)).toBe(true);
+      expect(resolved.name).toBe(place.name);
+    }
+  });
+
+  it('holds a reference it cannot resolve yet instead of inventing one', () => {
+    expect(resolvePlaceRef({ kind: 'current' }, graph, null)).toBeNull();
+    expect(resolvePlaceRef({ kind: 'stop', code: '201' }, undefined, here)).toBeNull();
+    expect(resolvePlaceRef({ kind: 'stop', code: 'nope' }, graph, here)).toBeNull();
+  });
+
+  it('ignores nonsense in the query string', () => {
+    expect(parsePlaceRef(undefined)).toBeNull();
+    expect(parsePlaceRef('')).toBeNull();
+    expect(parsePlaceRef('stop:')).toBeNull();
+    expect(parsePlaceRef('over,there')).toBeNull();
+    expect(parsePlaceRef('91,73.5,Off the planet')).toBeNull();
+  });
+});
+
+describe('url state', () => {
+  it('reads the trip out of a shared link', () => {
+    const state = readUrlState('?from=me&to=stop:201&route=133%40201%3E106&zoom=14');
+    expect(state).toEqual({ from: 'me', to: 'stop:201', route: '133@201>106' });
+  });
+
+  it('writes links a person can read', () => {
+    expect(toQueryString({ from: 'me', to: 'stop:201' })).toBe('?from=me&to=stop:201');
+    expect(toQueryString({ to: '4.17550,73.50930,Rasfannu' })).toBe(
+      '?to=4.17550,73.50930,Rasfannu',
+    );
+    expect(toQueryString({})).toBe('');
+  });
+
+  it('escapes what would otherwise break the query string', () => {
+    expect(toQueryString({ to: '4.1,73.5,Bru & Co' })).toBe('?to=4.1,73.5,Bru%20%26%20Co');
+  });
+
+  it('replaces the address bar, so a refresh comes back to the same trip', () => {
+    writeUrlState({ from: 'me', to: 'stop:201', route: '133@201>106' });
+    expect(window.location.search).toBe('?from=me&to=stop:201&route=133@201%3E106');
+    expect(readUrlState(window.location.search)).toEqual({
+      from: 'me',
+      to: 'stop:201',
+      route: '133@201>106',
+    });
+
+    writeUrlState({});
+    expect(window.location.search).toBe('');
+  });
+});
+
+describe('recent trips', () => {
+  beforeEach(() => useRecentTrips.getState().clear());
+
+  it('lists a repeated trip once, however far the rider has since walked', () => {
+    const { record } = useRecentTrips.getState();
+    record(currentLocation({ lat: 4.1755, lng: 73.5093 }), stopPlace('201'));
+    record(currentLocation({ lat: 4.1901, lng: 73.5222 }), stopPlace('201'));
+
+    expect(useRecentTrips.getState().trips).toHaveLength(1);
+  });
+
+  it('does not record a journey from a place to itself', () => {
+    useRecentTrips.getState().record(stopPlace('201'), stopPlace('201'));
+    expect(useRecentTrips.getState().trips).toEqual([]);
+  });
+
+  it('still keeps genuinely different trips apart', () => {
+    const { record } = useRecentTrips.getState();
+    record(stopPlace('201'), stopPlace('106'));
+    record(stopPlace('106'), stopPlace('201'));
+
+    expect(useRecentTrips.getState().trips).toHaveLength(2);
   });
 });

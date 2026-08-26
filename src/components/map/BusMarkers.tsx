@@ -7,6 +7,7 @@ import { compassPoint } from '@/lib/geo';
 import { formatAgo } from '@/lib/time';
 import { readableOn } from '@/components/RouteChip';
 import type { Route } from '@/lib/transit/types';
+import { BusTrails } from './BusTrails';
 import { useMap } from './MapContext';
 
 interface MarkerEntry {
@@ -159,9 +160,13 @@ export function BusMarkers({ route }: { route: Route }) {
     };
   }, []);
 
-  return selectedTrack
-    ? createPortal(<BusInfo track={selectedTrack} route={route} updatedAt={updatedAt} />, host)
-    : null;
+  return (
+    <>
+      <BusTrails routeCode={route.code} color={route.color} tracks={tracks} />
+      {selectedTrack &&
+        createPortal(<BusInfo track={selectedTrack} route={route} updatedAt={updatedAt} />, host)}
+    </>
+  );
 }
 
 function createMarker(color: string, onClick: () => void): MarkerEntry {

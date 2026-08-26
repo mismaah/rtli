@@ -120,9 +120,43 @@ the arrow stays steady. A heading is never guessed across a gap in reporting
 longer than 90 seconds, or from a jump too fast to be a bus, and a stopped bus
 keeps its last heading rather than snapping back to north.
 
+Positions also land off the road. The tracker is a consumer GPS in a dense
+low-rise city, so buses are regularly drawn a block from their own route —
+through buildings, or in the lagoon beside the Hulhumale' link road. The route
+geometry is known exactly, so
+[`src/lib/transit/snapToRoute.ts`](src/lib/transit/snapToRoute.ts) pulls a
+reported position back onto it — but only as far as the error deserves. Within
+40 m the nearest point on the route is taken as the truth; the correction tapers
+away to nothing by 120 m; past that the reading stands. A bus 200 m off its route
+is not suffering GPS error — it is on a diversion, running out of service, or the
+shape is incomplete — and moving it onto the line would invent a fact rather than
+clean one up. The correction happens before the heading is inferred, so the arrow
+steadies too.
+
+Each bus drags a short trail behind it, fading out towards the oldest end so the
+bright end reads as *now*. It is drawn from the positions the bus was confirmed
+to have reached — the same ones the heading is inferred from — so a parked bus
+leaves no smear of jitter, and a jump the feed cannot account for restarts the
+trail rather than drawing a line across the island.
+
 Tapping a bus shows what is actually known about it: plate and vehicle code,
 inferred heading and speed, how long since it last moved, and how old the reading
 is. All of it is labelled as estimated, because none of it is telemetry.
+
+### Links
+
+The trip lives in the address bar — `?from=me&to=stop:T02&route=...` — so a
+refresh comes back to the same screen and the link opens the same trip on someone
+else's phone. `me` is the rider's own position rather than a fixed point, which
+is also how the recents list knows that the same journey started three streets
+apart on two different days is one journey and not two.
+
+Places that a link cannot resolve on its own — a stop code before the timetable
+has loaded, `me` before the browser has answered — are held until their
+ingredients arrive, and written back to the URL meanwhile, so a reload during
+those first seconds loses nothing. The address bar is replaced rather than pushed:
+these are edits to one journey, not separate pages, and the back button should not
+walk through a rider's typing.
 
 ## Mobile
 
@@ -140,8 +174,9 @@ src/
   lib/
     geo.ts        haversine, bearings, walking model, line simplification
     time.ts       clock parsing pinned to UTC+5 (Maldives has no DST)
+    urlState.ts   the trip in the address bar
     transit/      graph building, RAPTOR planner, live overlay, ETA parsing,
-                  bus heading inference
+                  bus heading inference, route snapping, place identity
   hooks/          data fetching, geolocation, search
   components/     UI and map layers
   screens/        home, results, trip detail, stop detail, saved places
