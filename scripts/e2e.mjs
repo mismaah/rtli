@@ -6,8 +6,8 @@
  * snapshot. Guards the things unit tests cannot see: the map actually sizing and
  * painting, the sheet framing the trip rather than hiding it, and a clean console.
  *
- *   pnpm build && pnpm preview &   # http://localhost:4173
- *   pnpm e2e
+ *   npm run build && npm run preview &   # http://localhost:4173
+ *   npm run e2e
  */
 import { chromium } from 'playwright';
 

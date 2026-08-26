@@ -26,6 +26,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@types/geojson": "^7946.0.16",
+    "@types/node": "^22",
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",

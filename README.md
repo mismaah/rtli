@@ -10,12 +10,12 @@ Covers the 15 Greater Malé routes (Malé, Hulhulé/airport, Hulhumalé and Vill
 ## Running it
 
 ```bash
-pnpm install
-pnpm dev            # http://localhost:5173
-pnpm build          # production PWA into dist/
-pnpm test           # planner + parsing tests against a real API fixture
-pnpm smoke          # hit all four RTL endpoints for all 15 routes
-pnpm preview & pnpm e2e   # drive the built app in a mobile viewport, online and offline
+npm install
+npm run dev            # http://localhost:5173
+npm run build          # production PWA into dist/
+npm run test           # planner + parsing tests against a real API fixture
+npm run smoke          # hit all four RTL endpoints for all 15 routes
+npm run preview & npm run e2e   # drive the built app in a mobile viewport, online and offline
 ```
 
 ## How it works

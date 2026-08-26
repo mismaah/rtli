@@ -3,7 +3,7 @@
  *
  * RTL's API is unversioned and undocumented, so this exists to catch upstream
  * shape drift — a renamed field or a route that stops reporting — before it turns
- * into a blank screen. Run with `pnpm smoke`.
+ * into a blank screen. Run with `npm run smoke`.
  */
 const BASE = 'https://bo.rtl.mv:4455/maldives/api';
 
