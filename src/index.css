@@ -1,0 +1,72 @@
+@import 'tailwindcss';
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+@theme {
+  --color-ink-950: #0b1120;
+  --color-ink-900: #0f172a;
+  --color-ink-800: #1e293b;
+  --color-ink-700: #334155;
+  --color-ink-500: #64748b;
+  --color-ink-300: #cbd5e1;
+  --color-ink-100: #f1f5f9;
+  --color-brand-500: #2563eb;
+  --color-brand-400: #3b82f6;
+  --color-live-500: #16a34a;
+}
+
+:root {
+  color-scheme: dark;
+  /* Notch and home-indicator insets, used by the sheets and bars. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink-950);
+  color: var(--color-ink-100);
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* Kill the 300ms tap delay and iOS double-tap zoom. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Dhivehi is right-to-left; Thaana needs its own run direction. */
+.dv {
+  direction: rtl;
+  unicode-bidi: isolate;
+  font-family: 'MV Faseyha', 'A_Faruma', 'Faruma', sans-serif;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+/* MapLibre's own chrome, restyled for a dark UI. */
+.maplibregl-ctrl-attrib {
+  background: rgb(15 23 42 / 0.75) !important;
+  color: var(--color-ink-300) !important;
+  font-size: 10px !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--color-ink-300) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
