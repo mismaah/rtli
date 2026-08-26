@@ -66,7 +66,12 @@ body {
    swung around it. The arrow lives on a child element because MapLibre owns the
    marker element's own transform for positioning. */
 .rtl-bus {
-  position: relative;
+  /* Must stay `absolute`, as MapLibre's own `.maplibregl-marker` rule sets it.
+     This file is imported after maplibre-gl.css and matches its specificity, so
+     anything else here wins — and `relative` leaves every marker in normal flow,
+     stacked 44px below the last one and pinned that far from its own position at
+     every zoom. */
+  position: absolute;
   display: grid;
   width: 44px;
   height: 44px;

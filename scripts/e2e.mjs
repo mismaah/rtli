@@ -138,22 +138,36 @@ const liveCtx = await browser.newContext({
 });
 const livePage = await liveCtx.newPage();
 let step = 0;
-await livePage.route('**/livecoordinates', (route) =>
-  route.fulfill({
+// A transfer puts two routes on the map, each polling for its own buses. The
+// fleet is handed to whichever asks first and the other route is left empty, so
+// the same stub bus is never drawn twice in the same spot.
+let fleetRoute = null;
+await livePage.route('**/livecoordinates', (route) => {
+  const routeCode = route.request().postDataJSON()?.routeCode ?? '';
+  fleetRoute ??= routeCode;
+  const busList =
+    routeCode !== fleetRoute
+      ? []
+      : [
+          {
+            busCode: 'E2E-1',
+            plateNumber: 'A1A1234',
+            latitude: 4.1755 + step++ * 0.0009, // ~100 m north each poll
+            longitude: 73.5093,
+          },
+          // Two more so the marker-position check below has a stack to catch: a
+          // marker left in normal flow only misses its own position once it has
+          // a sibling above it, so a single bus proves nothing. Parked well
+          // clear of the lane E2E-1 drives up, so neither covers its button.
+          { busCode: 'E2E-2', plateNumber: 'A1A5678', latitude: 4.17, longitude: 73.49 },
+          { busCode: 'E2E-3', plateNumber: 'A1A9012', latitude: 4.165, longitude: 73.53 },
+        ];
+  return route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({
-      busList: [
-        {
-          busCode: 'E2E-1',
-          plateNumber: 'A1A1234',
-          latitude: 4.1755 + step++ * 0.0009, // ~100 m north each poll
-          longitude: 73.5093,
-        },
-      ],
-    }),
-  }),
-);
+    body: JSON.stringify({ busList }),
+  });
+});
 
 await livePage.goto(URL, { waitUntil: 'networkidle', timeout: 45_000 });
 await livePage.waitForTimeout(6000);
@@ -198,6 +212,47 @@ check(
   card !== null && sheet !== null && card.y > 0 && card.y + card.height <= sheet.y + 1,
   `bus popup stays clear of the sheet (${Math.round(card?.y ?? -1)}..${Math.round((card?.y ?? 0) + (card?.height ?? 0))} vs ${Math.round(sheet?.y ?? -1)})`,
 );
+
+// Every bus must be drawn where MapLibre put it, at any zoom.
+//
+// MapLibre positions a marker by writing `transform` on an element its own
+// stylesheet pins with `position: absolute`. Override that to `relative` and the
+// markers fall back into normal flow, each one stacked below the last and so
+// stranded a fixed number of pixels from its own coordinates — a gap that stays
+// the same on screen while the map zooms, which is to say a bus that slides
+// across the ground every time the zoom changes.
+async function markerOffsets() {
+  return livePage.evaluate(() => {
+    const origin = document.querySelector('.maplibregl-canvas-container').getBoundingClientRect();
+    return [...document.querySelectorAll('.rtl-bus')].map((el) => {
+      const rect = el.getBoundingClientRect();
+      // The inline transform is where MapLibre asked for the marker to go; the
+      // -50% in front of it is what the element's own size cancels out.
+      const put = /translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/.exec(el.style.transform);
+      if (!put) return Infinity;
+      return Math.hypot(
+        rect.left + rect.width / 2 - origin.left - Number(put[1]),
+        rect.top + rect.height / 2 - origin.top - Number(put[2]),
+      );
+    });
+  });
+}
+
+const canvasBox = await livePage.locator('.maplibregl-canvas').boundingBox();
+for (const notches of [-3, 6, -2]) {
+  for (let i = 0; i < Math.abs(notches); i++) {
+    await livePage.mouse.move(canvasBox.x + canvasBox.width / 2, canvasBox.y + canvasBox.height / 3);
+    await livePage.mouse.wheel(0, Math.sign(notches) * 120);
+    await livePage.waitForTimeout(60);
+  }
+  // Long enough for the zoom to land and for the buses' own glide to finish.
+  await livePage.waitForTimeout(1500);
+  const offsets = await markerOffsets();
+  check(
+    offsets.length >= 3 && offsets.every((d) => d < 2),
+    `every bus marker sits on its own position (${offsets.map((d) => d.toFixed(1)).join(', ')}px)`,
+  );
+}
 await liveCtx.close();
 
 // A trip is state, not a session: the address bar carries it, so a refresh comes
