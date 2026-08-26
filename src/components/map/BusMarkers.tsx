@@ -20,7 +20,10 @@ interface MarkerEntry {
 }
 
 const BUS_GLYPH = `<svg viewBox="0 0 24 24" width="13" height="13" fill="#fff" aria-hidden="true"><path d="M4 16c0 .9.4 1.7 1 2.2V20a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1h8v1a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1.8c.6-.5 1-1.3 1-2.2V6c0-3.5-3.6-4-8-4s-8 .5-8 4v10Zm3.5 1a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm9 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm1.5-6H6V6h12v5Z"/></svg>`;
-const ARROW_GLYPH = `<svg viewBox="0 0 10 8" width="11" height="9" aria-hidden="true"><path d="M5 0 9.4 8 5 5.9.6 8Z" fill="currentColor"/></svg>`;
+// The viewBox is padded past the arrow so the outline drawn in CSS has room to
+// sit outside it instead of being clipped; `.rtl-bus-dir svg` pulls that padding
+// back in so the arrow stays exactly where it was.
+const ARROW_GLYPH = `<svg viewBox="-1.6 -1.6 13.2 11.2" width="14.5" height="12.3" aria-hidden="true"><path d="M5 0 9.4 8 5 5.9.6 8Z" fill="currentColor"/></svg>`;
 
 /**
  * Broadcasts which bus was just opened. Module-level because each route mounts

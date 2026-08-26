@@ -121,7 +121,19 @@ body {
 }
 .rtl-bus-dir svg {
   display: block;
-  filter: drop-shadow(0 0 1.5px rgb(11 17 32 / 0.95));
+  /* Cancels the padding the glyph's viewBox carries for its outline, so the
+     arrow sits where it did before the outline was added. */
+  margin: -1.75px;
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.45));
+}
+/* The arrow is drawn in the route's own colour, which on a pale street or a
+   matching basemap all but disappears. The same dark ring the disc wears is
+   stroked around it — under the fill, so only the outer half shows. */
+.rtl-bus-dir svg path {
+  stroke: rgb(11 17 32 / 0.95);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  paint-order: stroke;
 }
 /* Direction is inferred from movement, so it is simply absent until a bus moves,
    and dimmed rather than removed once it stops — the last heading is still true. */
