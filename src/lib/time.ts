@@ -44,3 +44,18 @@ export function formatDuration(minutes: number): string {
   const m = total % 60;
   return m === 0 ? `${h} hr` : `${h} hr ${m} min`;
 }
+
+/**
+ * Relative age of a live reading: 0 -> "just now", 45_000 -> "45s ago".
+ * Seconds matter here — a rider deciding whether to trust a bus dot on the map
+ * wants to know if it is four seconds old or four minutes.
+ */
+export function formatAgo(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 3) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} hr ago`;
+}

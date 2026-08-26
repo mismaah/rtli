@@ -102,6 +102,28 @@ MapLibre GL with [OpenFreeMap](https://openfreemap.org) vector tiles — free, n
 API key, no usage limits. Vector tiles also cost far less mobile data than raster.
 MapLibre is code-split into its own chunk and lazy-loaded so the UI paints first.
 
+### Live buses
+
+`livecoordinates` gives a position and nothing else — no heading, no speed, no
+timestamp — so a bus dot on its own tells you a bus is *there*, not which way it
+is going, which is the thing a rider actually needs to know. Direction is
+therefore inferred in [`src/lib/transit/busTracks.ts`](src/lib/transit/busTracks.ts)
+by remembering where each bus was on earlier polls.
+
+The catch is that a parked bus still jitters a few metres every poll, and a
+bearing taken off that jitter spins the arrow at random. So the heading is only
+recomputed once a bus has travelled 12 m clear of an *anchor* — the position that
+set the current heading — rather than clear of the previous poll. Small real
+movements still accumulate against the anchor and eventually register, while
+noise never does. The dot itself follows every reading, so it stays live while
+the arrow stays steady. A heading is never guessed across a gap in reporting
+longer than 90 seconds, or from a jump too fast to be a bus, and a stopped bus
+keeps its last heading rather than snapping back to north.
+
+Tapping a bus shows what is actually known about it: plate and vehicle code,
+inferred heading and speed, how long since it last moved, and how old the reading
+is. All of it is labelled as estimated, because none of it is telemetry.
+
 ## Mobile
 
 Installable PWA with an offline app shell, cached basemap tiles and the merged
@@ -116,9 +138,10 @@ leave the device.
 src/
   api/            RTL endpoints, Photon geocoding
   lib/
-    geo.ts        haversine, walking model, line simplification
+    geo.ts        haversine, bearings, walking model, line simplification
     time.ts       clock parsing pinned to UTC+5 (Maldives has no DST)
-    transit/      graph building, RAPTOR planner, live overlay, ETA parsing
+    transit/      graph building, RAPTOR planner, live overlay, ETA parsing,
+                  bus heading inference
   hooks/          data fetching, geolocation, search
   components/     UI and map layers
   screens/        home, results, trip detail, stop detail, saved places

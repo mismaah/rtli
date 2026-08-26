@@ -62,6 +62,106 @@ body {
   color: var(--color-ink-300) !important;
 }
 
+/* Live bus markers: a coloured disc on the bus's position with a heading arrow
+   swung around it. The arrow lives on a child element because MapLibre owns the
+   marker element's own transform for positioning. */
+.rtl-bus {
+  position: relative;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  /* The box is only wide enough to swing the arrow clear of the disc; leaving it
+     clickable would have every bus eat a chunk of the map around it. */
+  pointer-events: none;
+  /* Buses glide between ten-second polls instead of teleporting. */
+  transition: transform 0.6s ease-out;
+}
+.rtl-bus-body {
+  position: relative;
+  display: grid;
+  padding: 0;
+  border: 0;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 9999px;
+  background: var(--rtl-bus-color);
+  box-shadow:
+    0 0 0 2px rgb(11 17 32 / 0.9),
+    0 2px 6px rgb(0 0 0 / 0.5);
+  cursor: pointer;
+  pointer-events: auto;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+/* A 22px disc is a mean target for a thumb; the hit area is grown without
+   growing the dot. */
+.rtl-bus-body::after {
+  content: '';
+  position: absolute;
+  inset: -8px;
+  border-radius: 9999px;
+}
+.rtl-bus-dir {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  color: var(--rtl-bus-color);
+  transition:
+    transform 0.6s ease-out,
+    opacity 0.3s ease;
+}
+.rtl-bus-dir svg {
+  display: block;
+  filter: drop-shadow(0 0 1.5px rgb(11 17 32 / 0.95));
+}
+/* Direction is inferred from movement, so it is simply absent until a bus moves,
+   and dimmed rather than removed once it stops — the last heading is still true. */
+.rtl-bus[data-heading='unknown'] .rtl-bus-dir {
+  opacity: 0;
+}
+.rtl-bus[data-motion='stopped'] .rtl-bus-dir {
+  opacity: 0.4;
+}
+.rtl-bus[data-selected='true'] .rtl-bus-body {
+  transform: scale(1.15);
+  box-shadow:
+    0 0 0 2px #f1f5f9,
+    0 2px 10px rgb(0 0 0 / 0.6);
+}
+/* A transform transition would leave the markers trailing behind the basemap
+   while the map is panned or zoomed, so gliding is only for position updates. */
+.rtl-map-moving .rtl-bus,
+.rtl-map-moving .rtl-bus-dir {
+  transition: none;
+}
+
+/* MapLibre's popup, restyled for the dark UI. */
+.maplibregl-popup-content {
+  padding: 0 !important;
+  border-radius: 14px !important;
+  background: var(--color-ink-900) !important;
+  box-shadow:
+    0 0 0 1px rgb(255 255 255 / 0.1),
+    0 10px 30px rgb(0 0 0 / 0.5) !important;
+}
+.maplibregl-popup-tip {
+  border-top-color: var(--color-ink-900) !important;
+  border-bottom-color: var(--color-ink-900) !important;
+  border-left-color: var(--color-ink-900) !important;
+  border-right-color: var(--color-ink-900) !important;
+}
+.maplibregl-popup-close-button {
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  color: var(--color-ink-300) !important;
+  font-size: 18px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

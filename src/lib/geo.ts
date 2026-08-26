@@ -25,6 +25,34 @@ export function haversineMeters(a: LatLng, b: LatLng): number {
   return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
+/**
+ * Initial bearing from `a` to `b`, in compass degrees clockwise from north.
+ *
+ * RTL's live feed reports position only, never heading, so a bus's direction is
+ * inferred from where it was on an earlier poll. Callers must gate this on a
+ * meaningful distance — over a few metres of GPS jitter the answer is noise.
+ */
+export function bearingDegrees(a: LatLng, b: LatLng): number {
+  const rad = Math.PI / 180;
+  const dLng = (b.lng - a.lng) * rad;
+  const lat1 = a.lat * rad;
+  const lat2 = b.lat * rad;
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (((Math.atan2(y, x) / rad) % 360) + 360) % 360;
+}
+
+const COMPASS = [
+  'north', 'north-east', 'east', 'south-east',
+  'south', 'south-west', 'west', 'north-west',
+] as const;
+
+/** 45 -> "north-east". Eight points is as precise as an inferred heading deserves. */
+export function compassPoint(degrees: number): string {
+  const normalized = ((degrees % 360) + 360) % 360;
+  return COMPASS[Math.round(normalized / 45) % 8];
+}
+
 /** Straight-line distance inflated by the detour factor. */
 export function walkMeters(a: LatLng, b: LatLng): number {
   return haversineMeters(a, b) * WALK_DETOUR_FACTOR;

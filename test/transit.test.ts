@@ -3,8 +3,10 @@ import fixture from './fixtures/routedetails.json';
 import { buildGraph, MAX_TRANSFER_WALK_M } from '@/lib/transit/buildGraph';
 import { generalizedCost, planJourney, totalDistanceM } from '@/lib/transit/plan';
 import { parseEta } from '@/lib/transit/parseEta';
-import { parseClock, formatClock, formatDuration, minutesOfDay } from '@/lib/time';
-import { haversineMeters } from '@/lib/geo';
+import { parseClock, formatClock, formatDuration, minutesOfDay, formatAgo } from '@/lib/time';
+import { haversineMeters, bearingDegrees, compassPoint } from '@/lib/geo';
+import { updateTracks, isStopped, MIN_MOVE_M, MAX_GAP_MS } from '@/lib/transit/busTracks';
+import type { LiveBus } from '@/api/rtl';
 import type { RouteDetailsResponse } from '@/api/rtl';
 import type { BusLeg, Itinerary, Place } from '@/lib/transit/types';
 
@@ -329,5 +331,131 @@ describe('time helpers', () => {
   it('pins minutesOfDay to UTC+5 regardless of host timezone', () => {
     // 2026-08-26T07:30:00Z is 12:30 in Malé.
     expect(minutesOfDay(new Date('2026-08-26T07:30:00Z'))).toBe(12 * 60 + 30);
+  });
+});
+
+describe('bearing', () => {
+  const male = { lat: 4.1755, lng: 73.5093 };
+
+  it('reads due north, east, south and west', () => {
+    expect(bearingDegrees(male, { lat: male.lat + 0.01, lng: male.lng })).toBeCloseTo(0, 1);
+    expect(bearingDegrees(male, { lat: male.lat, lng: male.lng + 0.01 })).toBeCloseTo(90, 1);
+    expect(bearingDegrees(male, { lat: male.lat - 0.01, lng: male.lng })).toBeCloseTo(180, 1);
+    expect(bearingDegrees(male, { lat: male.lat, lng: male.lng - 0.01 })).toBeCloseTo(270, 1);
+  });
+
+  it('always answers in 0..360', () => {
+    const b = bearingDegrees(male, { lat: male.lat - 0.01, lng: male.lng - 0.01 });
+    expect(b).toBeGreaterThan(180);
+    expect(b).toBeLessThan(270);
+  });
+
+  it('names the eight compass points, wrapping at north', () => {
+    expect(compassPoint(0)).toBe('north');
+    expect(compassPoint(45)).toBe('north-east');
+    expect(compassPoint(181)).toBe('south');
+    expect(compassPoint(359)).toBe('north');
+    expect(compassPoint(-90)).toBe('west');
+  });
+});
+
+describe('bus tracks', () => {
+  const START = 1_000_000;
+  /** ~11.1 m per 0.0001° of latitude at the equator. */
+  const bus = (lat: number, lng = 73.5093): LiveBus[] => [
+    { busCode: 'B1', plateNumber: 'A0A0000', latitude: lat, longitude: lng },
+  ];
+
+  it('has no heading for a bus seen only once', () => {
+    const tracks = updateTracks(new Map(), bus(4.1755), START);
+    const t = tracks.get('B1')!;
+    expect(t.heading).toBeNull();
+    expect(t.speedMps).toBeNull();
+    expect(t.firstSeenAt).toBe(START);
+  });
+
+  it('infers heading and speed once the bus clears the jitter radius', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    // 0.0009° north is ~100 m, well beyond MIN_MOVE_M.
+    tracks = updateTracks(tracks, bus(4.1764), START + 10_000);
+
+    const t = tracks.get('B1')!;
+    expect(t.heading).toBeCloseTo(0, 0);
+    expect(t.speedMps).toBeCloseTo(10, 0);
+    expect(t.movedAt).toBe(START + 10_000);
+  });
+
+  it('ignores GPS jitter: no heading, and movedAt stays put', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    // ~5.5 m, under the threshold.
+    tracks = updateTracks(tracks, bus(4.17555), START + 10_000);
+
+    const t = tracks.get('B1')!;
+    expect(haversineMeters({ lat: 4.1755, lng: 73.5093 }, t)).toBeLessThan(MIN_MOVE_M);
+    expect(t.heading).toBeNull();
+    expect(t.movedAt).toBe(START);
+    // The reported position is still shown, even though it did not re-anchor.
+    expect(t.lat).toBe(4.17555);
+    expect(t.updatedAt).toBe(START + 10_000);
+  });
+
+  it('measures from the anchor, so a slow crawl still yields a heading', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    // Three sub-threshold steps that add up to ~16 m.
+    tracks = updateTracks(tracks, bus(4.17555), START + 10_000);
+    tracks = updateTracks(tracks, bus(4.1756), START + 20_000);
+    tracks = updateTracks(tracks, bus(4.17565), START + 30_000);
+
+    expect(tracks.get('B1')!.heading).toBeCloseTo(0, 0);
+  });
+
+  it('keeps the last heading while a bus sits still, and reports it stopped', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, bus(4.1764), START + 10_000);
+    const heading = tracks.get('B1')!.heading;
+    tracks = updateTracks(tracks, bus(4.1764), START + 70_000);
+
+    const t = tracks.get('B1')!;
+    expect(t.heading).toBe(heading);
+    expect(isStopped(t, START + 70_000)).toBe(true);
+    expect(isStopped(t, START + 20_000)).toBe(false);
+  });
+
+  it('will not guess a heading across a long reporting gap', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, bus(4.1764), START + MAX_GAP_MS + 1);
+
+    const t = tracks.get('B1')!;
+    expect(t.heading).toBeNull();
+    // But it re-anchors, so the next ordinary poll can infer one.
+    tracks = updateTracks(tracks, bus(4.1773), START + MAX_GAP_MS + 11_000);
+    expect(tracks.get('B1')!.heading).toBeCloseTo(0, 0);
+  });
+
+  it('rejects an impossible jump rather than reporting 400 km/h', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, bus(4.2755), START + 10_000);
+
+    expect(tracks.get('B1')!.speedMps).toBeNull();
+  });
+
+  it('drops buses that stop reporting and skips broken coordinates', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, [], START + 10_000);
+    expect(tracks.size).toBe(0);
+
+    tracks = updateTracks(
+      new Map(),
+      [{ busCode: 'B2', plateNumber: 'X', latitude: NaN, longitude: 73.5 }],
+      START,
+    );
+    expect(tracks.size).toBe(0);
+  });
+
+  it('formats live ages in seconds before minutes', () => {
+    expect(formatAgo(0)).toBe('just now');
+    expect(formatAgo(12_000)).toBe('12s ago');
+    expect(formatAgo(120_000)).toBe('2 min ago');
+    expect(formatAgo(7_200_000)).toBe('2 hr ago');
   });
 });

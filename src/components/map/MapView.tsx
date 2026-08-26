@@ -42,7 +42,17 @@ export function MapView({ children, className }: Props) {
 
     instance.on('load', () => setMap(instance));
 
+    // Markers glide between position updates, but that same transition would
+    // leave them trailing behind the basemap while it is panned or zoomed, so
+    // the CSS turns it off for as long as the map is moving.
+    const startMove = () => instance.getContainer().classList.add('rtl-map-moving');
+    const endMove = () => instance.getContainer().classList.remove('rtl-map-moving');
+    instance.on('movestart', startMove);
+    instance.on('moveend', endMove);
+
     return () => {
+      instance.off('movestart', startMove);
+      instance.off('moveend', endMove);
       instance.remove();
       setMap(null);
     };

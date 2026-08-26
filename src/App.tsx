@@ -136,7 +136,7 @@ export default function App() {
             ))}
           {view === 'detail' &&
             shownRoutes.map((route) => (
-              <BusMarkers key={route.code} routeCode={route.code} color={route.color} />
+              <BusMarkers key={route.code} route={route} />
             ))}
           <FitBounds view={view} selected={selected} origin={origin} destination={destination} />
         </LazyMap>
