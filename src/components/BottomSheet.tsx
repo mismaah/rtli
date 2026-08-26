@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode, type PointerEvent } from 'react';
+import { SIDE_PANEL_WIDTH, useWideLayout } from '@/hooks/useWideLayout';
 
 export type SheetSnap = 'collapsed' | 'half' | 'full';
 
@@ -17,15 +18,19 @@ interface BottomSheetProps {
 }
 
 /**
- * Draggable bottom sheet.
+ * Draggable bottom sheet on phones; a fixed side panel once the screen is wide
+ * enough to show the map beside it.
  *
- * Built on pointer events rather than a library so the drag works identically
- * with touch, pen and mouse, and so the sheet can be dismissed one-handed.
+ * The drag is built on pointer events rather than a library so it works
+ * identically with touch, pen and mouse, and so the sheet can be dismissed
+ * one-handed.
  */
 export function BottomSheet({ snap, onSnapChange, header, children }: BottomSheetProps) {
   const [dragOffset, setDragOffset] = useState(0);
   const startY = useRef<number | null>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
+
+  const wide = useWideLayout();
 
   const heightPct = SNAP_VH[snap] * 100;
 
@@ -55,6 +60,26 @@ export function BottomSheet({ snap, onSnapChange, header, children }: BottomShee
   useEffect(() => {
     if (snap !== 'full') sheetRef.current?.scrollTo({ top: 0 });
   }, [snap]);
+
+  // Wide screens split rather than stack: the panel sits beside the map, so
+  // there is nothing to drag out of the way and no snap points to honour.
+  if (wide) {
+    return (
+      <aside
+        className="pointer-events-auto z-20 flex h-full shrink-0 flex-col border-l border-white/10 bg-ink-900"
+        style={{ width: SIDE_PANEL_WIDTH, paddingTop: 'var(--safe-top)' }}
+      >
+        {header ? <div className="shrink-0 px-4 pt-4">{header}</div> : null}
+        <div
+          ref={sheetRef}
+          className="no-scrollbar flex-1 overflow-y-auto overscroll-contain px-4 pt-4"
+          style={{ paddingBottom: 'calc(var(--safe-bottom) + 1rem)' }}
+        >
+          {children}
+        </div>
+      </aside>
+    );
+  }
 
   return (
     <div

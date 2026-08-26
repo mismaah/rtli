@@ -4,7 +4,8 @@
  * Drives the real UI in a mobile viewport with geolocation pinned to Malé, then
  * pulls the network out to confirm the app still plans a trip from its cached
  * snapshot. Guards the things unit tests cannot see: the map actually sizing and
- * painting, the sheet framing the trip rather than hiding it, and a clean console.
+ * painting, the sheet framing the trip rather than hiding it, the wide layout
+ * splitting instead of stacking, and a clean console.
  *
  *   npm run build && npm run preview &   # http://localhost:4173
  *   npm run e2e
@@ -94,6 +95,35 @@ check(
   unexpected.length === 0,
   `no unexpected errors while offline${unexpected.length ? `: ${unexpected[0]}` : ''}`,
 );
+
+// A wide screen splits rather than stacks: map on the left, panel beside it.
+const wideCtx = await browser.newContext({
+  viewport: { width: 1280, height: 800 },
+  geolocation: { latitude: 4.1755, longitude: 73.5093 },
+  permissions: ['geolocation'],
+});
+const widePage = await wideCtx.newPage();
+await widePage.goto(URL, { waitUntil: 'networkidle', timeout: 45_000 });
+await widePage.waitForTimeout(6000);
+
+const split = await widePage.evaluate(() => {
+  const map = document.querySelector('.maplibregl-map');
+  const panel = document.querySelector('aside');
+  if (!map || !panel) return null;
+  const m = map.getBoundingClientRect();
+  const p = panel.getBoundingClientRect();
+  return {
+    mapWidth: Math.round(m.width),
+    mapRight: Math.round(m.right),
+    panelLeft: Math.round(p.left),
+    panelWidth: Math.round(p.width),
+  };
+});
+check(
+  split !== null && split.panelLeft >= split.mapRight - 1 && split.mapWidth > 600,
+  `wide layout splits map and panel (${JSON.stringify(split)})`,
+);
+await wideCtx.close();
 
 await browser.close();
 console.log(failures.length === 0 ? '\nAll checks passed.' : `\n${failures.length} failed.`);

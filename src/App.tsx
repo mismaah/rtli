@@ -18,6 +18,7 @@ import { useTransitGraph } from '@/hooks/useTransitGraph';
 import { useGeolocation } from '@/hooks/useGeolocation';
 import { usePlan } from '@/hooks/usePlan';
 import { useOnline } from '@/hooks/useOnline';
+import { useWideLayout } from '@/hooks/useWideLayout';
 import { useSavedPlaces } from '@/store/savedPlaces';
 import { useRecentTrips } from '@/store/recentTrips';
 import { boundsOf } from '@/lib/geo';
@@ -31,6 +32,7 @@ export default function App() {
   const graph = data?.graph;
   const geo = useGeolocation(true);
   const online = useOnline();
+  const wide = useWideLayout();
 
   const [origin, setOrigin] = useState<Place | null>(null);
   const [destination, setDestination] = useState<Place | null>(null);
@@ -63,11 +65,13 @@ export default function App() {
 
   const stops = useMemo(() => (graph ? [...graph.stops.values()] : []), [graph]);
 
-  // Mirrors BottomSheet's snap fractions so the map frames what the sheet leaves visible.
+  // Mirrors BottomSheet's snap fractions so the map frames what the sheet leaves
+  // visible. In the split layout nothing covers the map, so a plain margin does.
   const sheetHeightPx = useMemo(() => {
+    if (wide) return 32;
     const fraction = snap === 'collapsed' ? 0.18 : snap === 'half' ? 0.55 : 0.92;
     return Math.round((typeof window === 'undefined' ? 800 : window.innerHeight) * fraction) + 24;
-  }, [snap]);
+  }, [snap, wide]);
 
   const highlighted = useMemo(() => {
     if (!selected) return [];
@@ -119,39 +123,41 @@ export default function App() {
   }
 
   return (
-    <div className="relative h-[100dvh] w-full overflow-hidden bg-ink-950">
-      <LazyMap className="absolute inset-0">
-        <MapPadding bottom={sheetHeightPx} />
-        <StopMarkers stops={stops} onSelect={handleStopSelect} highlighted={highlighted} />
-        <UserMarker position={geo.position} />
-        <EndpointMarkers origin={origin} destination={destination} userPosition={geo.position} />
-        {view === 'detail' &&
-          shownRoutes.map((route) => (
-            <RouteShapeLayer key={route.code} routeCode={route.code} color={route.color} />
-          ))}
-        {view === 'detail' &&
-          shownRoutes.map((route) => (
-            <BusMarkers key={route.code} routeCode={route.code} color={route.color} />
-          ))}
-        <FitBounds view={view} selected={selected} origin={origin} destination={destination} />
-      </LazyMap>
+    <div className="relative flex h-[100dvh] w-full overflow-hidden bg-ink-950">
+      <div className="relative min-w-0 flex-1">
+        <LazyMap className="absolute inset-0">
+          <MapPadding bottom={sheetHeightPx} />
+          <StopMarkers stops={stops} onSelect={handleStopSelect} highlighted={highlighted} />
+          <UserMarker position={geo.position} />
+          <EndpointMarkers origin={origin} destination={destination} userPosition={geo.position} />
+          {view === 'detail' &&
+            shownRoutes.map((route) => (
+              <RouteShapeLayer key={route.code} routeCode={route.code} color={route.color} />
+            ))}
+          {view === 'detail' &&
+            shownRoutes.map((route) => (
+              <BusMarkers key={route.code} routeCode={route.code} color={route.color} />
+            ))}
+          <FitBounds view={view} selected={selected} origin={origin} destination={destination} />
+        </LazyMap>
 
-      <header
-        className="pointer-events-none absolute inset-x-0 top-0 z-10 px-4"
-        style={{ paddingTop: 'calc(var(--safe-top) + 0.75rem)' }}
-      >
-        <div className="pointer-events-auto inline-flex items-center gap-2 rounded-full bg-ink-900/85 px-3 py-1.5 backdrop-blur">
-          <span className="text-sm font-bold tracking-tight text-ink-100">RTL Improved</span>
-          <span className="text-[10px] text-ink-500">Greater Malé</span>
-        </div>
-
-        {(!online || data?.fromCache) && (
-          <div className="pointer-events-auto mt-2 inline-flex items-center gap-2 rounded-full bg-amber-500/15 px-3 py-1.5 text-[11px] font-medium text-amber-200 backdrop-blur">
-            <span className="size-1.5 rounded-full bg-amber-400" />
-            Offline — using today's saved timetable. No live bus times.
+        <header
+          className="pointer-events-none absolute inset-x-0 top-0 z-10 px-4"
+          style={{ paddingTop: 'calc(var(--safe-top) + 0.75rem)' }}
+        >
+          <div className="pointer-events-auto inline-flex items-center gap-2 rounded-full bg-ink-900/85 px-3 py-1.5 backdrop-blur">
+            <span className="text-sm font-bold tracking-tight text-ink-100">RTL Improved</span>
+            <span className="text-[10px] text-ink-500">Greater Malé</span>
           </div>
-        )}
-      </header>
+
+          {(!online || data?.fromCache) && (
+            <div className="pointer-events-auto mt-2 inline-flex items-center gap-2 rounded-full bg-amber-500/15 px-3 py-1.5 text-[11px] font-medium text-amber-200 backdrop-blur">
+              <span className="size-1.5 rounded-full bg-amber-400" />
+              Offline — using today's saved timetable. No live bus times.
+            </div>
+          )}
+        </header>
+      </div>
 
       <BottomSheet snap={snap} onSnapChange={setSnap}>
         {isLoading && <p className="py-8 text-center text-sm text-ink-500">Loading bus routes…</p>}

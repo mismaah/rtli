@@ -3,6 +3,7 @@ import { nearestStops, searchStops, useStopIndex, usePlaceSearch } from '@/hooks
 import { formatDistance, haversineMeters, type LatLng } from '@/lib/geo';
 import { useSavedPlaces } from '@/store/savedPlaces';
 import { usePrefs } from '@/store/prefs';
+import { SIDE_PANEL_WIDTH, useWideLayout } from '@/hooks/useWideLayout';
 import type { Place, Stop, TransitGraph } from '@/lib/transit/types';
 
 interface Props {
@@ -13,7 +14,12 @@ interface Props {
   onClose: () => void;
 }
 
-/** Full-screen search: saved places, nearby stops, all stops, then OSM places. */
+/**
+ * Search: saved places, nearby stops, all stops, then OSM places.
+ *
+ * Takes the whole screen on phones; on wide screens it covers only the side
+ * panel, so the map you are picking a point on stays in view.
+ */
 export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Props) {
   const [query, setQuery] = useState('');
   const input = useRef<HTMLInputElement>(null);
@@ -21,6 +27,7 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
   const { places, searching } = usePlaceSearch(query);
   const saved = useSavedPlaces((s) => s.places);
   const showDhivehi = usePrefs((s) => s.showDhivehi);
+  const wide = useWideLayout();
 
   useEffect(() => {
     // Delayed so the sheet's entry transition doesn't fight the keyboard.
@@ -50,8 +57,12 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-ink-950"
-      style={{ paddingTop: 'var(--safe-top)' }}
+      className={
+        wide
+          ? 'fixed inset-y-0 right-0 z-50 flex flex-col border-l border-white/10 bg-ink-950'
+          : 'fixed inset-0 z-50 flex flex-col bg-ink-950'
+      }
+      style={{ paddingTop: 'var(--safe-top)', width: wide ? SIDE_PANEL_WIDTH : undefined }}
     >
       <div className="flex items-center gap-2 border-b border-white/10 px-3 py-3">
         <button
