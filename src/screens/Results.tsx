@@ -11,7 +11,7 @@ interface Props {
   onSelect: (itinerary: Itinerary) => void;
   onEditOrigin: () => void;
   onEditDestination: () => void;
-  onSaveDestination: () => void;
+  onToggleSaveDestination: () => void;
   destinationSaved: boolean;
 }
 
@@ -23,7 +23,7 @@ export function Results({
   onSelect,
   onEditOrigin,
   onEditDestination,
-  onSaveDestination,
+  onToggleSaveDestination,
   destinationSaved,
 }: Props) {
   const walkPreference = usePrefs((s) => s.walkPreference);
@@ -43,9 +43,9 @@ export function Results({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                onSaveDestination();
+                onToggleSaveDestination();
               }}
-              aria-label={destinationSaved ? 'Saved' : 'Save this place'}
+              aria-label={destinationSaved ? 'Remove from saved places' : 'Save this place'}
               className="grid size-10 shrink-0 place-items-center rounded-full text-ink-500 active:bg-white/10"
             >
               <StarIcon filled={destinationSaved} />

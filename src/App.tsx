@@ -62,6 +62,7 @@ export default function App() {
   const [following, setFollowing] = useState(true);
 
   const addSaved = useSavedPlaces((s) => s.add);
+  const removeSaved = useSavedPlaces((s) => s.remove);
   const savedPlaces = useSavedPlaces((s) => s.places);
   const recordTrip = useRecentTrips((s) => s.record);
 
@@ -345,17 +346,21 @@ export default function App() {
     [graph, journey.active],
   );
 
-  const destinationSaved = useMemo(
+  /** The saved entry this destination already is, so the star can undo itself. */
+  const savedDestination = useMemo(
     () =>
-      Boolean(
-        destination &&
-          savedPlaces.some(
-            (p) =>
-              Math.abs(p.lat - destination.lat) < 1e-5 && Math.abs(p.lng - destination.lng) < 1e-5,
-          ),
+      destination &&
+      savedPlaces.find(
+        (p) => Math.abs(p.lat - destination.lat) < 1e-5 && Math.abs(p.lng - destination.lng) < 1e-5,
       ),
     [savedPlaces, destination],
   );
+
+  const toggleSavedDestination = useCallback(() => {
+    if (!destination) return;
+    if (savedDestination) removeSaved(savedDestination.id);
+    else addSaved(destination);
+  }, [destination, savedDestination, addSaved, removeSaved]);
 
   /**
    * The one action the open screen exists to offer, pinned below it. A journey
@@ -470,8 +475,8 @@ export default function App() {
             destination={destination}
             itineraries={itineraries}
             loading={false}
-            destinationSaved={destinationSaved}
-            onSaveDestination={() => destination && addSaved(destination)}
+            destinationSaved={Boolean(savedDestination)}
+            onToggleSaveDestination={toggleSavedDestination}
             onSelect={(it) => {
               endJourney();
               setSelected(it);
