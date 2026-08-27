@@ -6,6 +6,7 @@ import { formatClock, formatDuration } from '@/lib/time';
 import { journeyFraction, stopsRemaining, type JourneyStep } from '@/lib/transit/journey';
 import { totalDistanceM } from '@/lib/transit/plan';
 import { usePrefs } from '@/store/prefs';
+import type { BoardedBus } from '@/hooks/useBoardedBus';
 import type { Journey } from '@/hooks/useJourney';
 import type { Itinerary, Stop } from '@/lib/transit/types';
 
@@ -91,6 +92,8 @@ export function JourneyNav({
         progress={progress}
         rideStops={rideStops}
         position={position}
+        vehicle={journey.vehicle}
+        positionSource={journey.positionSource}
         itinerary={itinerary}
         elapsed={elapsed}
         liveApplied={liveApplied}
@@ -152,6 +155,8 @@ function Instruction({
   progress,
   rideStops,
   position,
+  vehicle,
+  positionSource,
   itinerary,
   elapsed,
   liveApplied,
@@ -160,6 +165,8 @@ function Instruction({
   progress: Journey['progress'];
   rideStops: Stop[];
   position: LatLng | null;
+  vehicle: BoardedBus | null;
+  positionSource: Journey['positionSource'];
   itinerary: Itinerary;
   elapsed: number | null;
   liveApplied: boolean;
@@ -264,7 +271,11 @@ function Instruction({
     );
   }
 
-  const remaining = stopsRemaining(rideStops, position);
+  // Only something being observed can be counted from. The fallback position on
+  // a ride is the stop the rider boarded at, and counting off that would sit
+  // there reading "8 stops to go" for the whole journey as though it were true.
+  const tracked = positionSource === 'vehicle' || positionSource === 'fix';
+  const remaining = tracked ? stopsRemaining(rideStops, position) : null;
   return (
     <section
       className={`rounded-2xl border p-4 ${
@@ -313,7 +324,15 @@ function Instruction({
         </p>
       ) : (
         <p className="mt-3 text-xs text-ink-500">
-          Location off, so count the stops yourself and tap below when you get off.
+          Nothing reliable to track this bus by, so count the stops yourself and tap below
+          when you get off.
+        </p>
+      )}
+
+      {vehicle && (
+        <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-live-500">
+          <span className="inline-block size-1.5 animate-pulse rounded-full bg-live-500" />
+          Following bus {vehicle.plateNumber || vehicle.busCode}
         </p>
       )}
 

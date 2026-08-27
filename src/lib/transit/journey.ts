@@ -59,6 +59,23 @@ export const TRUST_M = 800;
  */
 export const TRUST_RIDE_M = 1500;
 
+/**
+ * How far the bus being tracked may sit from the rider's own fix before the bus
+ * stops being taken as where the rider is.
+ *
+ * Wide enough for a feed that polls every ten seconds and a phone that reports
+ * from between the tower blocks, tight enough that a bus latched onto by mistake
+ * — the one behind, at a stop where two were bunched — is noticed and dropped.
+ */
+export const VEHICLE_TRUST_M = 400;
+
+/**
+ * How close a tracked bus must be to the stop the rider just boarded at, or to
+ * the rider themselves, to be taken as the one they are on. A poll can be ten
+ * seconds old and a bus pulling away covers ground, so this is generous.
+ */
+export const BOARD_MATCH_M = 250;
+
 export function arrivalRadius(accuracy?: number | null): number {
   if (!accuracy || !Number.isFinite(accuracy)) return ARRIVE_RADIUS_M;
   return Math.min(MAX_ARRIVE_RADIUS_M, Math.max(ARRIVE_RADIUS_M, accuracy));
@@ -129,12 +146,29 @@ export function buildJourney(itinerary: Itinerary | null | undefined): JourneySt
  * between one confirmation and the next, so the fix is measured against the ride
  * itself instead of its ends. A rider who has just told the app they boarded in
  * Hulhumalé is not in Malé, however sure the phone is that they are.
+ *
+ * And riding is where a better answer than the phone exists. Once the bus the
+ * rider boarded has been identified in the live feed, `vehicle` is that bus's
+ * position, and it wins: it is reported by a tracker with a roof aerial and a
+ * power supply, it is already pulled back onto the route, and it keeps coming
+ * while the rider's phone is face-down in a bag. See `pickBoardedBus`.
  */
 export function believedPosition(
   step: JourneyStep | null,
   anchor: LatLng | null,
   fix: (LatLng & { accuracy?: number }) | null,
+  vehicle?: LatLng | null,
 ): (LatLng & { accuracy?: number }) | null {
+  if (step?.kind === 'ride' && vehicle) {
+    // A rider who has said they boarded is wherever that bus is, and the fleet
+    // tracker keeps reporting while their phone is in a pocket losing the sky.
+    // The fix is still the check on it: if the two have drifted apart, the bus
+    // being followed is the wrong one, and the phone is the better guess again.
+    if (!fix || haversineMeters(fix, vehicle) <= VEHICLE_TRUST_M) {
+      return { lat: vehicle.lat, lng: vehicle.lng };
+    }
+  }
+
   if (!fix) return anchor;
   if (!anchor || !step) return fix;
 
@@ -215,6 +249,41 @@ export function stopsRemaining(
     }
   }
   return stops.length - 1 - nearest;
+}
+
+/**
+ * Which of a route's live buses is the one the rider just boarded.
+ *
+ * The rider's tap is the timing: at that moment the bus they got on is at the
+ * stop they were standing at, so proximity identifies it. Where the ETA feed
+ * named a vehicle for that stop, that name breaks the tie between two buses
+ * bunched at the same kerb — which is exactly when proximity alone is weakest.
+ *
+ * A named bus that the feed puts nowhere near is still accepted as a last
+ * resort: it is a claim about this stop from the operator, and following the
+ * wrong bus is caught later by `believedPosition` comparing it to the fix.
+ */
+export function pickBoardedBus(
+  tracks: readonly (LatLng & { busCode: string })[],
+  near: LatLng,
+  expectedCode?: string | null,
+): string | null {
+  let nearest: string | null = null;
+  let best = BOARD_MATCH_M;
+
+  for (const track of tracks) {
+    const meters = haversineMeters(near, track);
+    if (meters > BOARD_MATCH_M) continue;
+    if (expectedCode && track.busCode === expectedCode) return track.busCode;
+    if (meters < best) {
+      best = meters;
+      nearest = track.busCode;
+    }
+  }
+
+  if (nearest) return nearest;
+  if (expectedCode && tracks.some((t) => t.busCode === expectedCode)) return expectedCode;
+  return null;
 }
 
 /** Where the rider is up to, as a fraction, for the progress bar. */

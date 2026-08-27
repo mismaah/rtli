@@ -50,9 +50,12 @@ import {
   ARRIVE_RADIUS_M,
   arrivalRadius,
   believedPosition,
+  BOARD_MATCH_M,
   TRUST_M,
+  VEHICLE_TRUST_M,
   buildJourney,
   journeyFraction,
+  pickBoardedBus,
   shouldAutoAdvance,
   stepProgress,
   stopsRemaining,
@@ -1149,6 +1152,43 @@ describe('a journey being travelled', () => {
     // With nothing reported at all, the last confirmed stop is all there is.
     expect(believedPosition(ride, board, null)).toEqual(board);
     expect(believedPosition(ride, null, null)).toBeNull();
+  });
+
+  it('rides on the bus\'s position rather than the phone\'s, once it knows the bus', () => {
+    const ride = buildJourney(trip()).find((s) => s.kind === 'ride')!;
+    const board = { lat: ride.bus!.boardStop.lat, lng: ride.bus!.boardStop.lng };
+    const bus = north(board, 900);
+
+    // A phone that has stopped reporting does not stop the ride from advancing.
+    expect(believedPosition(ride, board, null, bus)).toEqual(bus);
+    // Nor does one still reporting: the tracker is the better witness of the two.
+    const laggingFix = { ...north(board, 800), accuracy: 40 };
+    expect(believedPosition(ride, board, laggingFix, bus)).toEqual(bus);
+
+    // Unless the two have parted company, which means the wrong bus was latched
+    // onto — then the phone is believed again and judged as it was before.
+    const elsewhere = { ...north(board, 900 + VEHICLE_TRUST_M + 100), accuracy: 40 };
+    expect(believedPosition(ride, board, elsewhere, bus)).toEqual(elsewhere);
+
+    // And a bus is only ever consulted about a ride.
+    const walk = buildJourney(trip()).find((s) => s.kind === 'walk')!;
+    expect(believedPosition(walk, board, null, bus)).toEqual(board);
+  });
+
+  it('picks the boarded bus by where it is, and by name when two are bunched', () => {
+    const stop = { lat: 4.1755, lng: 73.5093 };
+    const here = { busCode: 'C1186', ...north(stop, 30) };
+    const alsoHere = { busCode: 'C1192', ...north(stop, 60) };
+    const gone = { busCode: 'C1180', ...north(stop, BOARD_MATCH_M + 200) };
+
+    expect(pickBoardedBus([gone, alsoHere, here], stop)).toBe('C1186');
+    // The ETA feed's vehicle settles which of the two at the kerb was boarded.
+    expect(pickBoardedBus([here, alsoHere], stop, 'C1192')).toBe('C1192');
+    // A named bus the feed puts nowhere near is still better than nothing.
+    expect(pickBoardedBus([gone], stop, 'C1180')).toBe('C1180');
+    // But a name that is not in the feed at all cannot be followed.
+    expect(pickBoardedBus([gone], stop, 'C9999')).toBeNull();
+    expect(pickBoardedBus([], stop, 'C1186')).toBeNull();
   });
 
   it('measures progress by steps done, not by steps listed', () => {
