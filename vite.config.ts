@@ -1,10 +1,50 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 import { fileURLToPath, URL } from 'node:url';
 
-export default defineConfig({
+/**
+ * Runtime caching for the optional backend.
+ *
+ * The API origin is only known at build time, so these rules are generated
+ * rather than written as literals — the RTL rules below are anchored to
+ * `bo.rtl.mv:4455` and match nothing on another host.
+ */
+function backendCaching(apiBase: string) {
+  if (!apiBase) return [];
+  const origin = apiBase.replace(/\/+$/, '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [
+    {
+      // Route geometry never changes, and the server's copy is pre-simplified.
+      urlPattern: new RegExp(`^${origin}/v1/shapes/`, 'i'),
+      handler: 'CacheFirst' as const,
+      options: {
+        cacheName: 'api-shapes',
+        expiration: { maxEntries: 20, maxAgeSeconds: 30 * 24 * 60 * 60 },
+        cacheableResponse: { statuses: [0, 200] },
+      },
+    },
+    {
+      // The timetable: worth serving stale rather than not at all.
+      urlPattern: new RegExp(`^${origin}/v1/graph`, 'i'),
+      handler: 'NetworkFirst' as const,
+      options: {
+        cacheName: 'api-graph',
+        networkTimeoutSeconds: 8,
+        expiration: { maxEntries: 4, maxAgeSeconds: 24 * 60 * 60 },
+        cacheableResponse: { statuses: [0, 200] },
+      },
+    },
+    {
+      // Live data must never be served stale.
+      urlPattern: new RegExp(`^${origin}/v1/(live|etas)`, 'i'),
+      handler: 'NetworkOnly' as const,
+    },
+  ];
+}
+
+export default defineConfig(({ mode }) => ({
   resolve: {
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
@@ -89,8 +129,9 @@ export default defineConfig({
             urlPattern: /^https:\/\/bo\.rtl\.mv:4455\/maldives\/api\/(booking\/v1\/bus\/livecoordinates|gps-engine\/eta\/all-stops-of-route)/i,
             handler: 'NetworkOnly',
           },
+          ...backendCaching(loadEnv(mode, process.cwd(), 'VITE_').VITE_API_BASE ?? ''),
         ],
       },
     }),
   ],
-});
+}));

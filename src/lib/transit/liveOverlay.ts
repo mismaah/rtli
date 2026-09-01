@@ -1,4 +1,4 @@
-import { fetchStopEtas } from '@/api/rtl';
+import { fetchStopEtas, fetchStopEtasBatch, type StopsEtaResponse } from '@/api/rtl';
 import { minutesOfDay } from '@/lib/time';
 import { parseEta } from './parseEta';
 import type { Itinerary, LiveEta, LiveEtaIndex, StopCode } from './types';
@@ -36,28 +36,31 @@ export async function fetchLiveEtas(
   routeCodes: string[],
   signal?: AbortSignal,
 ): Promise<LiveEtaIndex> {
-  const byRoute: LiveEtaIndex = new Map();
   const readAt = minutesOfDay();
 
+  // One request for every route, when there is a backend to ask. Unbatched, a
+  // phone comparing a few itineraries issues one of these per route per poll.
+  try {
+    const batched = await fetchStopEtasBatch(routeCodes, signal);
+    if (batched) {
+      const byRoute: LiveEtaIndex = new Map();
+      for (const [routeCode, route] of Object.entries(batched.routes)) {
+        // The backend may have been holding this reading for a moment. A
+        // countdown read three seconds ago is three seconds wrong, and the
+        // planner works in absolute times, so the age is discounted here.
+        byRoute.set(routeCode, indexRows(route, readAt - route.ageMs / 60_000));
+      }
+      return byRoute;
+    }
+  } catch {
+    // Fall through to RTL directly.
+  }
+
+  const byRoute: LiveEtaIndex = new Map();
   await Promise.all(
     routeCodes.map(async (routeCode) => {
       try {
-        const res = await fetchStopEtas(routeCode, signal);
-        const rows = [
-          ...(res.inboundStopsETAList ?? []),
-          // Observed null in every capture, but handled rather than assumed.
-          ...(res.outboundStopsETAList ?? []),
-        ];
-        const perStop = new Map<StopCode, LiveEta>();
-        for (const row of rows) {
-          const parsed = parseEta(row.eta, row.vehicleCode);
-          if (!parsed) continue;
-          const eta: LiveEta = { ...parsed, expectedAt: readAt + parsed.minutes };
-          const existing = perStop.get(row.stopCode);
-          // Several buses can be inbound to one stop; the rider wants the next.
-          if (!existing || eta.minutes < existing.minutes) perStop.set(row.stopCode, eta);
-        }
-        byRoute.set(routeCode, perStop);
+        byRoute.set(routeCode, indexRows(await fetchStopEtas(routeCode, signal), readAt));
       } catch {
         // Live data is an enhancement, not a dependency.
       }
@@ -65,6 +68,31 @@ export async function fetchLiveEtas(
   );
 
   return byRoute;
+}
+
+/**
+ * Folds one route's ETA rows into a per-stop index.
+ *
+ * `readAt` is the clock the countdowns are relative to, in minutes since Malé
+ * midnight — now for a direct read, or slightly earlier for one the backend had
+ * already been holding.
+ */
+function indexRows(res: StopsEtaResponse, readAt: number): Map<StopCode, LiveEta> {
+  const rows = [
+    ...(res.inboundStopsETAList ?? []),
+    // Observed null in every capture, but handled rather than assumed.
+    ...(res.outboundStopsETAList ?? []),
+  ];
+  const perStop = new Map<StopCode, LiveEta>();
+  for (const row of rows) {
+    const parsed = parseEta(row.eta, row.vehicleCode);
+    if (!parsed) continue;
+    const eta: LiveEta = { ...parsed, expectedAt: readAt + parsed.minutes };
+    const existing = perStop.get(row.stopCode);
+    // Several buses can be inbound to one stop; the rider wants the next.
+    if (!existing || eta.minutes < existing.minutes) perStop.set(row.stopCode, eta);
+  }
+  return perStop;
 }
 
 /**

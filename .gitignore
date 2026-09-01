@@ -4,3 +4,12 @@ dev-dist
 *.local
 .DS_Store
 *.tsbuildinfo
+
+# Backend store (created at runtime)
+server/*.db
+server/*.db-shm
+server/*.db-wal
+
+# Backend deployment settings (per-host)
+server/deploy.env
+server/data/

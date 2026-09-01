@@ -17,6 +17,35 @@ interface MarkerEntry {
   body: HTMLButtonElement;
   /** Unwrapped rotation in degrees, so 350° -> 10° turns the short way. */
   angle: number;
+  /** Where the marker is currently drawn, which lags the fix while gliding. */
+  atLng: number;
+  atLat: number;
+  /** The fix it is gliding towards, and when the glide began. */
+  toLng: number;
+  toLat: number;
+  fromLng: number;
+  fromLat: number;
+  startedAt: number;
+}
+
+/**
+ * How long a marker takes to slide from its previous fix to its newest one.
+ *
+ * This is *catch-up* interpolation, not extrapolation: both endpoints are
+ * positions the bus was actually reported at, and the animation only fills in
+ * the travel between them. No position ahead of the data is ever invented, so a
+ * bus is never drawn somewhere it has not been — which is the distinction that
+ * keeps this honest. The popup's "updated Xs ago" continues to report the true
+ * age of the fix, not the age of the animation.
+ *
+ * Kept well under the ~11 s upstream cadence so the marker settles long before
+ * the next fix arrives, rather than permanently trailing reality.
+ */
+const GLIDE_MS = 900;
+
+/** Ease-out: buses decelerate into a position rather than stopping dead. */
+function ease(t: number): number {
+  return 1 - (1 - t) * (1 - t);
 }
 
 const BUS_GLYPH = `<svg viewBox="0 0 24 24" width="13" height="13" fill="#fff" aria-hidden="true"><path d="M4 16c0 .9.4 1.7 1 2.2V20a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1h8v1a1 1 0 0 0 1 1h1a1 1 0 0 0 1-1v-1.8c.6-.5 1-1.3 1-2.2V6c0-3.5-3.6-4-8-4s-8 .5-8 4v10Zm3.5 1a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm9 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm1.5-6H6V6h12v5Z"/></svg>`;
@@ -87,9 +116,18 @@ export function BusMarkers({ route }: { route: Route }) {
       if (!entry) {
         entry = createMarker(route.color, () => select(track.busCode));
         entry.marker.setLngLat([track.lng, track.lat]).addTo(map);
+        entry.atLng = entry.fromLng = entry.toLng = track.lng;
+        entry.atLat = entry.fromLat = entry.toLat = track.lat;
+        entry.startedAt = now - GLIDE_MS; // A new bus appears in place.
         current.set(track.busCode, entry);
-      } else {
-        entry.marker.setLngLat([track.lng, track.lat]);
+      } else if (track.lng !== entry.toLng || track.lat !== entry.toLat) {
+        // A new fix: glide from wherever the marker is now, so an update that
+        // lands mid-glide redirects smoothly instead of snapping back.
+        entry.fromLng = entry.atLng;
+        entry.fromLat = entry.atLat;
+        entry.toLng = track.lng;
+        entry.toLat = track.lat;
+        entry.startedAt = now;
       }
 
       entry.el.dataset.selected = String(track.busCode === selected);
@@ -116,6 +154,41 @@ export function BusMarkers({ route }: { route: Route }) {
       }
     }
   }, [map, tracks, route, selected, select]);
+
+  /**
+   * Slides each marker from its previous fix to its newest one.
+   *
+   * Runs for the life of the layer rather than per update, so a fix arriving
+   * mid-glide simply redirects the one in flight. Only markers still in motion
+   * are touched, so a map of parked buses costs nothing per frame.
+   */
+  useEffect(() => {
+    let frame = 0;
+
+    const step = () => {
+      const now = Date.now();
+      for (const entry of markers.current.values()) {
+        const progress = Math.min(1, (now - entry.startedAt) / GLIDE_MS);
+        if (progress >= 1) {
+          // Settled: make sure it is exactly on the reported fix, not near it.
+          if (entry.atLng !== entry.toLng || entry.atLat !== entry.toLat) {
+            entry.atLng = entry.toLng;
+            entry.atLat = entry.toLat;
+            entry.marker.setLngLat([entry.atLng, entry.atLat]);
+          }
+          continue;
+        }
+        const t = ease(progress);
+        entry.atLng = entry.fromLng + (entry.toLng - entry.fromLng) * t;
+        entry.atLat = entry.fromLat + (entry.toLat - entry.fromLat) * t;
+        entry.marker.setLngLat([entry.atLng, entry.atLat]);
+      }
+      frame = requestAnimationFrame(step);
+    };
+
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, []);
 
   // The popup is created once per selection and then only repositioned, so it
   // does not blink out of existence on every ten-second poll. Its opening
@@ -196,7 +269,20 @@ function createMarker(color: string, onClick: () => void): MarkerEntry {
     onClick();
   });
 
-  return { marker: new maplibregl.Marker({ element: el }), el, dir, body, angle: 0 };
+  return {
+    marker: new maplibregl.Marker({ element: el }),
+    el,
+    dir,
+    body,
+    angle: 0,
+    atLng: 0,
+    atLat: 0,
+    toLng: 0,
+    toLat: 0,
+    fromLng: 0,
+    fromLat: 0,
+    startedAt: 0,
+  };
 }
 
 /** The marker's accessible name — the popup's content, said in one line. */

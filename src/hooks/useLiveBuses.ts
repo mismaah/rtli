@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { fetchLiveCoordinates, type LiveBus } from '@/api/rtl';
 import { usePageVisible } from './usePageVisible';
+import { useIsStreamed } from './useLiveStream';
 
 const POLL_MS = 10_000;
 
@@ -9,9 +10,14 @@ const POLL_MS = 10_000;
  *
  * Polling only runs while the tab is in the foreground; RTL is a small public
  * service and there is no reason to poll a screen nobody is looking at.
+ *
+ * It also stands down entirely while a live stream is feeding this route, since
+ * the stream writes into this same cache key. Polling resumes by itself if the
+ * stream drops, so losing the backend costs at most one poll interval.
  */
 export function useLiveBuses(routeCode: string | null, enabled = true) {
   const visible = usePageVisible();
+  const streamed = useIsStreamed(routeCode);
 
   return useQuery<LiveBus[]>({
     queryKey: ['rtl', 'livecoordinates', routeCode],
@@ -19,8 +25,8 @@ export function useLiveBuses(routeCode: string | null, enabled = true) {
       const res = await fetchLiveCoordinates(routeCode!, signal);
       return res.busList ?? [];
     },
-    enabled: Boolean(routeCode) && enabled && visible,
-    refetchInterval: visible ? POLL_MS : false,
+    enabled: Boolean(routeCode) && enabled && visible && !streamed,
+    refetchInterval: visible && !streamed ? POLL_MS : false,
     refetchIntervalInBackground: false,
     staleTime: 0,
     gcTime: 0,

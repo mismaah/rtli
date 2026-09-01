@@ -24,6 +24,7 @@ import {
   isStopped,
   MIN_MOVE_M,
   MAX_GAP_MS,
+  HEADING_EXPIRY_MS,
   TRAIL_MAX_AGE_MS,
   TRAIL_MAX_POINTS,
 } from '@/lib/transit/busTracks';
@@ -690,6 +691,35 @@ describe('bus tracks', () => {
     expect(t.heading).toBe(heading);
     expect(isStopped(t, START + 70_000)).toBe(true);
     expect(isStopped(t, START + 20_000)).toBe(false);
+  });
+
+  it('keeps a heading across a brief gap, since the bus is likely still on its trip', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, bus(4.1764), START + 10_000);
+    const heading = tracks.get('B1')!.heading;
+    expect(heading).not.toBeNull();
+
+    // Gone longer than MAX_GAP_MS, so no new bearing is claimed — but well
+    // inside HEADING_EXPIRY_MS, so the one on screen still stands.
+    tracks = updateTracks(tracks, bus(4.1773), START + 10_000 + MAX_GAP_MS + 1);
+    expect(tracks.get('B1')!.heading).toBe(heading);
+  });
+
+  it('drops a heading once the silence is too long for it to mean anything', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, bus(4.1764), START + 10_000);
+    expect(tracks.get('B1')!.heading).not.toBeNull();
+
+    // Overnight: the bus may have turned at a terminal, finished its run, or
+    // been swapped out. Last night's direction is not this morning's.
+    tracks = updateTracks(tracks, bus(4.1773), START + 10_000 + HEADING_EXPIRY_MS + 1);
+
+    const t = tracks.get('B1')!;
+    expect(t.heading).toBeNull();
+    expect(t.speedMps).toBeNull();
+    // It is still the same bus, and still where the feed says it is.
+    expect(t.firstSeenAt).toBe(START);
+    expect(t.lat).toBeCloseTo(4.1773, 6);
   });
 
   it('will not guess a heading across a long reporting gap', () => {

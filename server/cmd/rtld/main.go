@@ -1,0 +1,145 @@
+// Command rtld is the rtl-improved backend: a read-through cache and recorder
+// in front of RTL's public bus API.
+//
+// It is deliberately optional. The PWA calls RTL directly when this is
+// unreachable, so an outage here degrades the app to exactly what it was before
+// this server existed — never to something broken.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/mismaah/rtl-improved/server/internal/api"
+	"github.com/mismaah/rtl-improved/server/internal/hub"
+	"github.com/mismaah/rtl-improved/server/internal/poller"
+	"github.com/mismaah/rtl-improved/server/internal/rtl"
+	"github.com/mismaah/rtl-improved/server/internal/store"
+)
+
+func main() {
+	var (
+		addr        = flag.String("addr", envOr("RTLD_ADDR", ":8080"), "listen address")
+		upstream    = flag.String("upstream", envOr("RTLD_UPSTREAM", rtl.DefaultBaseURL), "RTL API base URL")
+		allowOrigin = flag.String("allow-origin", envOr("RTLD_ALLOW_ORIGIN", "*"), "CORS Access-Control-Allow-Origin")
+		logLevel    = flag.String("log-level", envOr("RTLD_LOG_LEVEL", "info"), "debug, info, warn or error")
+		dbPath      = flag.String("db", envOr("RTLD_DB", "rtld.db"), "SQLite path; empty disables history and live streaming")
+		trustProxy  = flag.Bool("trust-proxy", envOr("RTLD_TRUST_PROXY", "") == "1",
+			"treat CF-Connecting-IP / X-Forwarded-For as the real client; only safe when the sole route in is through that proxy")
+		maxConns = flag.Int("max-connections", envInt("RTLD_MAX_CONNECTIONS", hub.DefaultMaxConnections), "maximum concurrent SSE connections")
+		maxPer   = flag.Int("max-per-client", envInt("RTLD_MAX_PER_CLIENT", hub.DefaultMaxPerClient), "maximum concurrent SSE connections per client address")
+	)
+	flag.Parse()
+
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
+	slog.SetDefault(log)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	client := rtl.NewClient(*upstream)
+	options := api.Options{
+		RTL:               client,
+		Log:               log,
+		AllowOrigin:       *allowOrigin,
+		TrustProxyHeaders: *trustProxy,
+	}
+	if *allowOrigin == "*" {
+		log.Warn("CORS is open to any origin; set -allow-origin to your front end")
+	}
+	if !*trustProxy {
+		log.Info("proxy headers not trusted; per-client limits use the socket address",
+			"hint", "set -trust-proxy when running behind a Cloudflare Tunnel")
+	}
+
+	// History and live streaming both hang off the store. Without it the server
+	// is still a useful read-through cache, so a storage problem degrades rather
+	// than prevents startup.
+	if *dbPath != "" {
+		db, err := store.Open(ctx, *dbPath)
+		if err != nil {
+			log.Error("could not open the store; running as a cache only", "path", *dbPath, "err", err)
+		} else {
+			defer db.Close()
+			go db.RunRetention(ctx, log)
+
+			broker := hub.NewWithLimits(*maxConns, *maxPer)
+			live := poller.New(client, broker, db, log)
+			go live.Run(ctx)
+
+			options.Hub = broker
+			options.Poller = live
+			log.Info("history and live streaming enabled", "db", *dbPath,
+				"rawRetention", store.RawRetention, "aggregateRetention", store.AggregateRetention)
+		}
+	}
+
+	server := api.NewServer(options)
+
+	httpServer := &http.Server{
+		Addr:    *addr,
+		Handler: server.Handler(),
+		// Generous write timeout: SSE streams live on this server too, and a
+		// short one would sever them mid-journey.
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", *addr, "upstream", *upstream)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case err := <-errCh:
+		log.Error("server failed", "err", err)
+		os.Exit(1)
+	case <-ctx.Done():
+		log.Info("shutting down")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Error("graceful shutdown failed", "err", err)
+		os.Exit(1)
+	}
+	log.Info("stopped")
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func parseLevel(name string) slog.Level {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(name)); err != nil {
+		return slog.LevelInfo
+	}
+	return level
+}

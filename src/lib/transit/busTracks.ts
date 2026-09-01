@@ -27,6 +27,22 @@ export const MAX_GAP_MS = 90_000;
 /** 108 km/h. Faster than that is a feed glitch, not a bus on Malé's streets. */
 export const MAX_SPEED_MPS = 30;
 
+/**
+ * How long a heading survives without being reconfirmed by movement.
+ *
+ * A bus that drops out of the feed for a moment and comes back is almost
+ * certainly still on the same trip pointing the same way, so its arrow is kept
+ * rather than blanked. One that has been gone for ten minutes is not: it may
+ * have turned at a terminal, finished its run, or been swapped for another
+ * vehicle, and drawing last-seen direction on it asserts something nobody knows.
+ *
+ * This is deliberately much longer than `MAX_GAP_MS`, which governs whether a
+ * *new* bearing may be computed. Keeping an old heading needs weaker evidence
+ * than claiming a fresh one. A bus that is present but parked keeps its heading
+ * indefinitely — that path never reaches here.
+ */
+export const HEADING_EXPIRY_MS = 10 * 60_000;
+
 /** No movement for this long reads as waiting at a stop or parked up. */
 export const STOPPED_AFTER_MS = 45_000;
 
@@ -128,9 +144,15 @@ export function updateTracks(
       ...position,
       busCode: bus.busCode,
       plateNumber: bus.plateNumber || prior.plateNumber,
-      // A stale or impossible jump re-anchors without claiming to know a heading,
-      // but never throws away the heading already on screen.
-      heading: trustworthy ? bearingDegrees(prior.anchor, position) : prior.heading,
+      // A stale or impossible jump re-anchors without claiming to know a
+      // heading. The one already on screen is kept — but only while it is still
+      // evidence of anything; across a long silence it is dropped rather than
+      // presented as current.
+      heading: trustworthy
+        ? bearingDegrees(prior.anchor, position)
+        : elapsedMs <= HEADING_EXPIRY_MS
+          ? prior.heading
+          : null,
       speedMps: trustworthy ? speedMps : null,
       movedAt: now,
       updatedAt: now,

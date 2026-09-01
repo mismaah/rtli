@@ -217,6 +217,205 @@ those first seconds loses nothing. The address bar is replaced rather than pushe
 these are edits to one journey, not separate pages, and the back button should not
 walk through a rider's typing.
 
+### The backend
+
+There is an optional Go service in [`server/`](server/). The app works without
+it — that is the whole design constraint — but four things are structurally
+impossible for a browser alone:
+
+**The timetable is only as complete as one device observed.** RTL returns only
+*upcoming* departures, so a fresh install at 19:00 has no morning and cannot
+answer "what time is the first bus". The server watches all day and serves the
+whole thing.
+
+**Port 4455 is blocked on some networks.** The server sits on :443 and proxies.
+
+**Every client polls independently.** A single phone on the trip screen can issue
+~50 requests a minute. One server loop serves everyone — and only polls tightly
+for routes somebody is actually watching, so idle load stays near 45 req/min for
+the whole network rather than rising per user.
+
+**No history exists.** The 15-minute headway assumed for R10, R11, R12 and R15 is
+a guess. Recorded movement turns it into a measurement.
+
+#### What the poll rate actually is
+
+Measured against the live feed, not assumed: **each bus's position advances on a
+~11 second cycle**, buses update independently and staggered, and the median
+movement per update is 64 m. Polling faster than that returns the same
+coordinates — the client's existing 10 s poll is already rate-matched to the
+source.
+
+So the server does not poll faster to get more data; there is none. It polls at
+3 s to notice a change *sooner*, and pushes it over SSE. A 10 s poll sits at a
+random phase against an 11 s cycle and is ~5.5 s stale on average, which at 64 m
+per update is roughly 30 m of error. Streaming cuts that to ~1.5 s.
+
+Smoothness comes from the client, not the network: markers glide between two
+*known* fixes over 900 ms. That is catch-up interpolation, never extrapolation —
+no position ahead of the data is invented, and the popup goes on reporting the
+true age of the reading.
+
+#### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/graph` | Routes, stops and timetables, in RTL's own shape |
+| `GET /v1/shapes/{routeCode}` | Route geometry, pre-simplified (R2: 374 KB → 8.6 KB) |
+| `GET /v1/etas?routes=…` | One request in place of a per-route fan-out |
+| `GET /v1/live/stream?routes=…` | SSE: snapshot on connect, then per-bus deltas |
+| `GET /v1/live/{routeCode}` | Plain-JSON positions, for clients that cannot stream |
+| `GET /v1/meta`, `/healthz` | Freshness and liveness |
+
+The graph is served in RTL's own JSON shape rather than as a prebuilt graph, so
+[`buildGraph.ts`](src/lib/transit/buildGraph.ts) stays the single normalizer and
+the server can never disagree with the direct-to-RTL fallback about what a route
+is.
+
+Because the server has been tracking continuously, the SSE snapshot arrives with
+headings, speeds and trails already inferred. Polling cannot do that: the client
+must watch a bus travel 12 m across two polls before it can draw an arrow, and it
+discards that history on every route change.
+
+#### The fallback ladder
+
+Server → RTL directly → today's IndexedDB snapshot. The seam is inside
+[`src/api/rtl.ts`](src/api/rtl.ts), where all four fetchers already funnel
+through one request helper, so no call site knows the server exists. A circuit
+breaker sets the server aside after two consecutive failures for 60 s — without
+it, a server that is down would make every request pay a timeout before falling
+back, which is a latency regression exactly when things are already wrong.
+
+#### Storage
+
+SQLite, no user data of any kind — no accounts, no cookies, nothing keyed to a
+person or device. Saved places and recent trips stay in `localStorage` as before.
+
+Two retention tiers, because raw positions are bulky and short-lived while what
+is learned from them is small and worth keeping: **raw fixes are pruned at 7
+days, derived aggregates at 90**. Only real movement is recorded — a parked bus
+re-reporting the same coordinates every 11 seconds would be most of the table.
+
+#### Running it
+
+```bash
+cd server
+go test ./...
+go run ./cmd/rtld -addr :8080 -db rtld.db
+```
+
+Then point the app at it and rebuild:
+
+```bash
+VITE_API_BASE=https://api.example.com npm run build
+```
+
+Unset, the app calls RTL directly exactly as before.
+
+#### Deploying
+
+The front end is on Cloudflare Pages; the backend runs in Docker on a home
+server, reached only through a Cloudflare Tunnel. Set `VITE_API_BASE` in the
+Pages build environment to the tunnel's hostname.
+
+```bash
+cp server/deploy.env.example server/deploy.env   # then edit ALLOW_ORIGIN
+./docker.sh                                      # pull, build, restart, follow logs
+./docker.sh --no-pull                            # rebuild the working tree as-is
+```
+
+The image is a statically linked binary on `distroless/static` — 21 MB, no
+shell, no package manager. The container runs read-only, with all capabilities
+dropped, as the invoking user, so the mounted database directory needs no
+`chown`. The build happens before the running container is touched, so a broken
+build leaves the current deployment up.
+
+Three things about this shape are load-bearing:
+
+**The port is bound to loopback**, not published to the network. The tunnel
+reaches it locally and nothing else can reach it at all.
+
+**`-trust-proxy` is set, and is only safe because of that.** Behind the tunnel
+every request arrives from `cloudflared` on loopback, so `RemoteAddr` is the same
+address for every visitor alike and a per-client limit keyed on it would be
+meaningless. Cloudflare supplies the real client in `CF-Connecting-IP`. On a
+directly reachable port that flag would instead let anyone forge an identity per
+request and walk straight past the limits. (If capacity refusals ever appear
+under light load, check that header is actually arriving — without it every
+visitor shares one identity and `MAX_PER_CLIENT` becomes a global cap.)
+
+**Nothing may buffer `/v1/live/stream`.** It is sent with `X-Accel-Buffering: no`
+and `Cache-Control: no-transform`, and the 20-second heartbeat keeps it inside
+Cloudflare's idle timeout. Get this wrong and the stream connects and then
+silently delivers nothing until it drops, which looks exactly like a broken feed.
+
+#### Limits and staleness
+
+The stream is public and unauthenticated, so connections are capped — 500 in
+total and 20 per client by default. Cloudflare handles volumetric abuse; these
+are the backstop that stops one host exhausting memory. The per-client figure is
+deliberately loose: Malé's mobile carriers use CGNAT, so a great many real riders
+share one source address and a tight cap would lock out a network rather than an
+abuser. Refusals are a `503` with `Retry-After`, sent before any streaming header
+so the client can actually read them.
+
+Every cache also has a **stale bound**: how far past its TTL an entry may still
+be served while upstream is unreachable, after which the request fails so the
+client falls back to RTL or to its own saved snapshot. Serving something slightly
+old beats a blank screen; serving it indefinitely means quietly presenting
+yesterday as today.
+
+| | TTL | Stale bound |
+|---|---|---|
+| Timetable | 60 s | 6 h — routes are static and the timetable covers the day |
+| Geometry | 24 h | 7 d — stale geometry is simply correct geometry |
+| ETAs | 10 s | 60 s — a countdown is only true near when it was read |
+| Positions | 2 s | 30 s — a bus drawn where it was is a bus in the wrong place |
+
+#### Overnight
+
+Buses report roughly 04:00–01:00, so the poller sleeps from **01:00 to 03:59**
+Malé time: no position requests, no ETA requests, nothing sent to RTL for three
+hours. Retention still runs hourly, which is a good time for it, and the cached
+endpoints still answer.
+
+Two things follow from that gap, and both are handled rather than tolerated.
+
+**Positions expire.** Nothing is polling, so without a bound the last fleet of
+the night would sit in memory until morning and a client connecting at 02:00
+would receive it as its opening snapshot — a live-looking picture of where buses
+were three hours ago. Tracks older than five minutes are withheld and swept from
+memory, so the honest answer at 3am is an empty snapshot. Five minutes is
+comfortably longer than the 20-second idle poll, so an unwatched route's
+perfectly good position is never thrown away for being one cycle old.
+
+**Headings expire too.** A bus reappearing at 04:00 trips the 90-second gap guard,
+so no heading is *inferred* across the silence — but the heading already on
+screen used to be kept regardless, which meant a bus could briefly show last
+night's direction. A heading now survives ten minutes of silence and no longer:
+long enough that a momentary dropout keeps its arrow, short enough that a bus
+which may have turned at a terminal, finished its run or been swapped out claims
+nothing. A bus that is *present* but parked still keeps its heading indefinitely
+— that is a different situation, and pointing the way it last went is correct.
+
+#### Keeping the two in step
+
+Bus heading, speed and trail inference exists twice: `busTracks.ts` /
+`snapToRoute.ts` in TypeScript, and `server/internal/track` in Go. A client that
+falls back from the server to RTL switches between them mid-session, so a
+divergence would show up as a bus jumping on the map.
+
+Both are held to one golden fixture built from real captured feed data —
+[`test/fixtures/track-golden.json`](test/fixtures/track-golden.json), 120 frames
+of four real buses. `test/trackGolden.test.ts` and
+`server/internal/track/golden_test.go` assert against the same file, so either
+side drifting is a build failure rather than a bug report. Regenerate
+deliberately:
+
+```bash
+UPDATE_GOLDEN=1 npx vitest run test/trackGolden.test.ts
+```
+
 ## Mobile
 
 Installable PWA with an offline app shell, cached basemap tiles and the merged
@@ -241,4 +440,14 @@ src/
   components/     UI and map layers
   screens/        home, results, trip detail, step-by-step journey, stop
                   detail, saved places
+
+server/           optional Go backend (see "The backend")
+  cmd/rtld/       entrypoint
+  internal/
+    rtl/          upstream client
+    track/        Go port of the snapping and heading inference
+    poller/       demand-led fan-in polling
+    hub/          SSE broadcast
+    store/        SQLite history and retention
+    api/          HTTP handlers
 ```

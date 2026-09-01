@@ -1,0 +1,6 @@
+*.db
+*.db-shm
+*.db-wal
+deploy.env
+Dockerfile
+.dockerignore

@@ -18,6 +18,7 @@ import { StopDetail } from '@/screens/StopDetail';
 import { JourneyNav, JourneyActionBar } from '@/screens/JourneyNav';
 import { Saved } from '@/screens/Saved';
 import { useTransitGraph } from '@/hooks/useTransitGraph';
+import { useLiveStream } from '@/hooks/useLiveStream';
 import { useGeolocation } from '@/hooks/useGeolocation';
 import { usePlan } from '@/hooks/usePlan';
 import { useOnline } from '@/hooks/useOnline';
@@ -198,6 +199,15 @@ export default function App() {
       ];
     });
   }, [graph, selected]);
+
+  // One SSE stream for whichever routes are on screen. It writes into the same
+  // react-query cache useLiveBuses fills, so BusMarkers and useBoardedBus are
+  // unchanged; with no backend, or no stream, they go on polling as before.
+  const streamedRoutes = useMemo(
+    () => (view === 'detail' ? busLegs.map((leg) => leg.route.code) : []),
+    [view, busLegs],
+  );
+  useLiveStream(streamedRoutes);
 
   /** Stops on a drawn route that this journey passes by rather than uses. */
   const dimmedStops = useMemo(() => {
