@@ -4,11 +4,14 @@ import type {
   BusLeg,
   Itinerary,
   Leg,
+  LiveEta,
+  LiveEtaIndex,
   Place,
   Route,
   Stop,
   StopCode,
   TransitGraph,
+  Trip,
   WalkLeg,
 } from './types';
 
@@ -24,6 +27,11 @@ export interface PlanOptions {
   /** Rounds of boarding; N rounds allows N-1 transfers. */
   maxRounds?: number;
   maxResults?: number;
+  /**
+   * Live arrivals, keyed route then stop. Where a reported bus can still be
+   * caught it is planned on in place of the timetable — see `earliestTrip`.
+   */
+  liveEtas?: LiveEtaIndex;
 }
 
 const DEFAULTS = {
@@ -105,6 +113,8 @@ interface ViaBus {
   routeCode: string;
   departAt: number;
   estimated: boolean;
+  /** Set when `departAt` is a reported arrival rather than a timetable time. */
+  live?: LiveEta;
 }
 
 /**
@@ -112,6 +122,11 @@ interface ViaBus {
  *
  * With 15 routes, 101 stops and ~40 trips per route this settles in a couple of
  * milliseconds, so there is no need for anything more elaborate.
+ *
+ * Given `options.liveEtas`, the search runs on reported arrivals wherever it has
+ * one for a bus the rider can still catch, so a late or missing bus reshapes the
+ * whole answer — which options are offered, when to leave, whether a connection
+ * still stands — rather than being noted beside times that no longer hold.
  */
 export function planJourney(
   graph: TransitGraph,
@@ -182,7 +197,17 @@ export function planJourney(
     for (const routeCode of routesTouching(graph, marked)) {
       const route = graph.routes.get(routeCode);
       if (!route) continue;
-      relaxRoute(graph, route, boardable, best, marked, round, improved, busArrivals);
+      relaxRoute(
+        graph,
+        route,
+        boardable,
+        best,
+        marked,
+        round,
+        improved,
+        busArrivals,
+        options.liveEtas?.get(routeCode),
+      );
     }
 
     // Walking interchange, so the next round can board at a neighbouring stop.
@@ -321,6 +346,7 @@ function relaxRoute(
   round: number,
   improved: Set<StopCode>,
   busArrivals: Label[],
+  liveAtStop?: Map<StopCode, LiveEta>,
 ): void {
   let boardIndex = -1;
   let boardLabel: Label | null = null;
@@ -343,6 +369,7 @@ function relaxRoute(
             routeCode: route.code,
             departAt: departureAt(trip, boardIndex, boardLabel),
             estimated: trip.estimated,
+            live: trip.live,
           },
         };
         busArrivals.push(label);
@@ -360,7 +387,7 @@ function relaxRoute(
     if (!label || !marked.has(stopCode)) continue;
 
     const readyAt = label.arriveAt + (label.round === 0 ? 0 : MIN_TRANSFER_MIN);
-    const candidate = earliestTrip(route, i, readyAt);
+    const candidate = earliestTrip(route, i, readyAt, liveAtStop?.get(stopCode));
     if (!candidate) continue;
 
     const currentDeparture = trip ? departureAt(trip, boardIndex, boardLabel!) : Infinity;
@@ -374,16 +401,68 @@ function relaxRoute(
 
 interface TripView {
   times: (number | null)[];
+  /**
+   * Minutes added to every timetable time so the trip runs to the bus that was
+   * actually reported. Zero for a trip taken straight off the schedule.
+   */
+  shift: number;
+  /** Departure read off the feed, on a route with no timetable to shift. */
+  liveDepartAt?: number;
+  /** The reading this trip was matched to, when it came from one. */
+  live?: LiveEta;
   estimated: boolean;
   headwayMin: number;
 }
 
-/** Earliest trip on `route` departing stop index `index` at or after `readyAt`. */
-function earliestTrip(route: Route, index: number, readyAt: number): TripView | null {
+/**
+ * Earliest departure from stop index `index` at or after `readyAt`.
+ *
+ * A reported bus outranks the timetable. The feed is tracking the vehicles
+ * themselves, so when it says the next bus reaches this stop in nine minutes,
+ * nine minutes is when the rider can leave — including when the timetable
+ * promises one sooner, which is exactly the case a printed time lets a rider
+ * down in: the bus that is running late, or is not running at all, is still
+ * there in the schedule.
+ *
+ * The reading only stands in for the timetable on a bus the rider can still
+ * catch. One arriving before they can reach the stop says nothing about the one
+ * after it, so those boardings fall back to the schedule.
+ */
+function earliestTrip(
+  route: Route,
+  index: number,
+  readyAt: number,
+  live?: LiveEta,
+): TripView | null {
+  const liveDepartAt = live?.expectedAt;
+  const catchable = liveDepartAt != null && liveDepartAt >= readyAt;
+
   if (route.trips.length === 0) {
-    // Frequency route: no timetable published, so assume a headway.
-    return { times: [], estimated: true, headwayMin: route.headwayMin ?? 15 };
+    // Frequency route: no timetable published, so a reported bus is the only
+    // real departure there is. Failing that, assume a headway.
+    return catchable
+      ? { times: [], shift: 0, liveDepartAt, live, estimated: true, headwayMin: 0 }
+      : { times: [], shift: 0, estimated: true, headwayMin: route.headwayMin ?? 15 };
   }
+
+  if (catchable) {
+    // The feed names a time, not a trip. Matching it to the nearest scheduled
+    // departure from this stop borrows that trip's onward times — which stops it
+    // serves, and how long it takes between them — and slides them onto the time
+    // reported. Landing on a neighbouring trip costs next to nothing, since
+    // consecutive trips run the same road at the same speeds.
+    const matched = nearestTripDeparting(route, index, liveDepartAt);
+    if (matched) {
+      return {
+        times: matched.times,
+        shift: liveDepartAt - matched.times[index]!,
+        live,
+        estimated: false,
+        headwayMin: 0,
+      };
+    }
+  }
+
   let bestTrip: TripView | null = null;
   let bestDeparture = Infinity;
   for (const t of route.trips) {
@@ -391,18 +470,42 @@ function earliestTrip(route: Route, index: number, readyAt: number): TripView | 
     if (depart == null || depart < readyAt) continue;
     if (depart < bestDeparture) {
       bestDeparture = depart;
-      bestTrip = { times: t.times, estimated: false, headwayMin: 0 };
+      bestTrip = { times: t.times, shift: 0, estimated: false, headwayMin: 0 };
     }
   }
   return bestTrip;
 }
 
-function departureAt(trip: TripView, boardIndex: number, boardLabel: Label): number {
-  if (trip.estimated) {
-    // Expected wait for a rider turning up at random to a stop served every H minutes.
-    return boardLabel.arriveAt + trip.headwayMin / 2;
+/**
+ * The trip whose scheduled departure from `index` falls closest to `at`.
+ *
+ * `route.trips` is in chronological order and the comparison is strict, so a
+ * reported time sitting exactly between two trips takes the earlier one — a bus
+ * behind its slot is the common case, one ahead of it is not.
+ */
+function nearestTripDeparting(route: Route, index: number, at: number): Trip | null {
+  let best: Trip | null = null;
+  let bestGap = Infinity;
+  for (const t of route.trips) {
+    const depart = t.times[index];
+    if (depart == null) continue;
+    const gap = Math.abs(depart - at);
+    if (gap < bestGap) {
+      bestGap = gap;
+      best = t;
+    }
   }
-  return trip.times[boardIndex] ?? boardLabel.arriveAt;
+  return best;
+}
+
+function departureAt(trip: TripView, boardIndex: number, boardLabel: Label): number {
+  if (trip.times.length === 0) {
+    // Frequency route: the reported bus, or the expected wait for a rider
+    // turning up at random to a stop served every H minutes.
+    return trip.liveDepartAt ?? boardLabel.arriveAt + trip.headwayMin / 2;
+  }
+  const scheduled = trip.times[boardIndex];
+  return scheduled == null ? boardLabel.arriveAt : scheduled + trip.shift;
 }
 
 function arrivalAt(
@@ -423,7 +526,9 @@ function arrivalAt(
   const depart = trip.times[boardIndex];
   const arrive = trip.times[alightIndex];
   if (arrive == null || depart == null || arrive < depart) return null;
-  return arrive;
+  // Shifted with the departure: a bus reported nine minutes late is nine minutes
+  // late all the way down the line, and its connections have to be judged on that.
+  return arrive + trip.shift;
 }
 
 /** Walks the label chain back to the origin and emits legs in travel order. */
@@ -481,6 +586,7 @@ function reconstruct(graph: TransitGraph, end: Label, origin: Place): Leg[] | nu
         meters: rideMeters(route, graph.stops, boardIndex, alightIndex),
         fare: route.fare,
         estimated: via.estimated,
+        liveEta: via.live,
       });
       cursor = via.from;
     }

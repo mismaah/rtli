@@ -70,7 +70,17 @@ export interface LiveEta {
   minutes: number;
   vehicleCode: string;
   label: string;
+  /**
+   * Minutes since Malé midnight the bus is due, stamped when the reading was
+   * taken. `minutes` is only true at the instant it was fetched, and planning
+   * happens later and against absolute times, so this is what the planner reads.
+   * Absent on a reading parsed outside a fetch, such as the stop board's.
+   */
+  expectedAt?: number;
 }
+
+/** Next reported arrival per stop, per route. */
+export type LiveEtaIndex = Map<RouteCode, Map<StopCode, LiveEta>>;
 
 export interface WalkLeg {
   kind: 'walk';
@@ -100,6 +110,11 @@ export interface BusLeg {
   fare: number;
   /** True when times came from an assumed headway, not a published timetable. */
   estimated: boolean;
+  /**
+   * The reading this leg's times were planned from. Its presence means
+   * `departAt` is when a tracked bus is actually due rather than when the
+   * timetable says one should be.
+   */
   liveEta?: LiveEta;
 }
 

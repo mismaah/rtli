@@ -241,7 +241,7 @@ function Instruction({
 
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-500">
           <span className="tabular-nums">
-            {bus.estimated ? 'Around' : 'Departs'} {formatClock(bus.departAt)}
+            {bus.estimated && !live ? 'Around' : 'Departs'} {formatClock(bus.departAt)}
           </span>
           <span>MVR {bus.fare.toFixed(2)}</span>
           <span>Get off at {bus.alightStop.name}</span>

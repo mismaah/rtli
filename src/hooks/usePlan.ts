@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { planJourney } from '@/lib/transit/plan';
-import { fetchLiveEtas, mergeLiveEtas, routeCodesOf } from '@/lib/transit/liveOverlay';
+import { fetchLiveEtas, routeCodesOf } from '@/lib/transit/liveOverlay';
 import { useNowMinutes } from '@/hooks/useNowMinutes';
 import { usePageVisible } from '@/hooks/usePageVisible';
 import { usePrefs } from '@/store/prefs';
@@ -9,7 +9,7 @@ import type { Itinerary, Place, TransitGraph } from '@/lib/transit/types';
 
 export interface PlanResult {
   itineraries: Itinerary[];
-  /** True once live ETAs have been merged in. */
+  /** True once the live feed has been read, whether or not it had anything. */
   liveApplied: boolean;
 }
 
@@ -17,15 +17,19 @@ export interface PlanResult {
 const POLL_MS = 20_000;
 
 /**
- * Plans a journey, then layers live ETAs on top.
+ * Plans a journey, on live arrivals wherever the feed reports one.
  *
- * The schedule-only result renders immediately and the live pass patches it in
- * when it lands, so a slow or unavailable ETA endpoint never delays results.
+ * Planned twice, deliberately. The schedule-only pass renders immediately, so a
+ * slow or unreachable ETA endpoint never delays results, and it is also what
+ * decides which routes are worth polling — a poll key taken from the live-aware
+ * plan would move every time the feed changed the answer, evicting the cache it
+ * had just filled. The trade is that a route no schedule-only option rides is
+ * never polled, so it is planned from the timetable even if it is running.
  *
- * Both halves are re-driven over time. The plan is recomputed as the wall clock
+ * Both passes are re-driven over time. The plan is recomputed as the wall clock
  * turns over, so a departure that has just gone drops off the list instead of
- * sitting at the top; the ETAs are polled on their own interval, so the "next in
- * 4 min" badge counts down rather than freezing at whatever it said on arrival.
+ * sitting at the top; the ETAs are polled on their own interval, so a bus
+ * falling further behind moves the times it is quoted at.
  */
 export function usePlan(
   graph: TransitGraph | undefined,
@@ -71,10 +75,22 @@ export function usePlan(
     staleTime: 0,
   });
 
-  const itineraries = useMemo(
-    () => (liveIndex ? mergeLiveEtas(scheduled, liveIndex) : scheduled),
-    [scheduled, liveIndex],
-  );
+  /**
+   * Replanned rather than annotated, so a bus the feed puts ten minutes behind
+   * is ten minutes behind everywhere it matters: the departure the rider walks
+   * to, the connection that may no longer stand, and the ranking that decides
+   * whether this is still the option to show first.
+   */
+  const itineraries = useMemo(() => {
+    if (!liveIndex || liveIndex.size === 0) return scheduled;
+    if (!graph || !origin || !destination) return scheduled;
+    return planJourney(graph, origin, destination, {
+      departAt: searchFrom,
+      maxWalkM,
+      walkPreference,
+      liveEtas: liveIndex,
+    });
+  }, [graph, origin, destination, searchFrom, maxWalkM, walkPreference, scheduled, liveIndex]);
 
   return { itineraries, liveApplied: liveIndex !== undefined || routeKey.length === 0 };
 }

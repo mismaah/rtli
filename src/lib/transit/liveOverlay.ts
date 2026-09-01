@@ -1,9 +1,9 @@
 import { fetchStopEtas } from '@/api/rtl';
+import { minutesOfDay } from '@/lib/time';
 import { parseEta } from './parseEta';
-import type { Itinerary, LiveEta, StopCode } from './types';
+import type { Itinerary, LiveEta, LiveEtaIndex, StopCode } from './types';
 
-/** Next reported arrival per stop, per route. */
-export type LiveEtaIndex = Map<string, Map<StopCode, LiveEta>>;
+export type { LiveEtaIndex };
 
 /** The routes an itinerary set rides, sorted so the list is a stable cache key. */
 export function routeCodesOf(itineraries: Itinerary[]): string[] {
@@ -17,10 +17,17 @@ export function routeCodesOf(itineraries: Itinerary[]): string[] {
 /**
  * Reads live arrivals for the given routes.
  *
- * Kept separate from the merge below so the two can run on their own clocks: the
- * plan is recomputed as the minute turns, while these are polled on their own
- * interval. Folding them together meant a replan silently discarded live data
- * and refetched it, which showed up as the ETA badges blinking out every minute.
+ * Kept separate from the planning it feeds so the two can run on their own
+ * clocks: the plan is recomputed as the minute turns, while these are polled on
+ * their own interval. Folding them together meant a replan silently discarded
+ * live data and refetched it, which showed up as the ETA badges blinking out
+ * every minute.
+ *
+ * Each reading is stamped with the clock time the bus is due, taken as this call
+ * goes out. RTL reports a countdown, and a countdown read at 13:40 is wrong by
+ * 13:43; the planner works in absolute times and runs whenever the minute turns
+ * or the rider retunes their preferences, so the conversion belongs here, at the
+ * one moment "in 4 minutes" is known to be true.
  *
  * Every failure is swallowed — a missing ETA must never cost the rider their
  * itinerary, so a route that reports nothing simply has no entry.
@@ -30,6 +37,7 @@ export async function fetchLiveEtas(
   signal?: AbortSignal,
 ): Promise<LiveEtaIndex> {
   const byRoute: LiveEtaIndex = new Map();
+  const readAt = minutesOfDay();
 
   await Promise.all(
     routeCodes.map(async (routeCode) => {
@@ -42,8 +50,9 @@ export async function fetchLiveEtas(
         ];
         const perStop = new Map<StopCode, LiveEta>();
         for (const row of rows) {
-          const eta = parseEta(row.eta, row.vehicleCode);
-          if (!eta) continue;
+          const parsed = parseEta(row.eta, row.vehicleCode);
+          if (!parsed) continue;
+          const eta: LiveEta = { ...parsed, expectedAt: readAt + parsed.minutes };
           const existing = perStop.get(row.stopCode);
           // Several buses can be inbound to one stop; the rider wants the next.
           if (!existing || eta.minutes < existing.minutes) perStop.set(row.stopCode, eta);
@@ -61,9 +70,11 @@ export async function fetchLiveEtas(
 /**
  * Annotates planned itineraries with live arrivals at their boarding stops.
  *
- * Deliberately applied after planning, never inside it: live coverage is partial
- * (some routes report no buses at all), so the schedule stays the source of
- * truth and this only annotates it.
+ * For a plan built without live data. `planJourney` given a `liveEtas` index
+ * does better than this — it plans on the reported times rather than pinning
+ * them beside timetable ones — so this is the fallback for an itinerary that
+ * has already been planned and cannot be planned again, and it deliberately
+ * leaves the times it finds alone.
  */
 export function mergeLiveEtas(itineraries: Itinerary[], index: LiveEtaIndex): Itinerary[] {
   if (index.size === 0) return itineraries;

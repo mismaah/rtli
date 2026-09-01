@@ -419,6 +419,128 @@ describe('live ETA overlay', () => {
   });
 });
 
+describe('planning on live arrivals', () => {
+  const noon = parseClock('12:00')!;
+  const from = stopPlace('103');
+  const to = stopPlace('114');
+  const scheduled = planJourney(graph, from, to, { departAt: noon });
+  const booked = scheduled[0].legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+  /** A feed reading for one stop, due at a given minute of the Malé day. */
+  function reported(leg: BusLeg, expectedAt: number, vehicleCode = 'B7'): LiveEtaIndex {
+    return new Map([
+      [
+        leg.route.code,
+        new Map([
+          [
+            leg.boardStop.code,
+            {
+              minutes: Math.round(expectedAt - noon),
+              vehicleCode,
+              label: `${Math.round(expectedAt - noon)} min`,
+              expectedAt,
+            },
+          ],
+        ]),
+      ],
+    ]);
+  }
+
+  function boardings(itineraries: Itinerary[], leg: BusLeg): BusLeg[] {
+    return itineraries
+      .flatMap((it) => it.legs)
+      .filter((l): l is BusLeg => l.kind === 'bus')
+      .filter((l) => l.route.code === leg.route.code && l.boardStop.code === leg.boardStop.code);
+  }
+
+  it('boards when the bus is reported, not when the timetable says', () => {
+    const late = booked.departAt + 9;
+    const plans = planJourney(graph, from, to, {
+      departAt: noon,
+      liveEtas: reported(booked, late),
+    });
+
+    const found = boardings(plans, booked);
+    expect(found.length).toBeGreaterThan(0);
+    // The timetable still promises the earlier bus; the feed says it is not there
+    // yet, and nothing may be planned on a departure the feed has ruled out.
+    expect(found.every((l) => l.departAt >= late)).toBe(true);
+    expect(found.some((l) => l.departAt === late)).toBe(true);
+  });
+
+  it('pulls the boarding forward for a bus running ahead of the timetable', () => {
+    const early = booked.departAt - 6;
+    const plans = planJourney(graph, from, to, {
+      departAt: noon,
+      liveEtas: reported(booked, early),
+    });
+
+    expect(boardings(plans, booked).some((l) => l.departAt === early)).toBe(true);
+  });
+
+  it('carries the delay down the line to the alighting stop', () => {
+    const late = booked.departAt + 9;
+    const plans = planJourney(graph, from, to, {
+      departAt: noon,
+      liveEtas: reported(booked, late),
+    });
+
+    const same = boardings(plans, booked).find(
+      (l) => l.alightStop.code === booked.alightStop.code && l.departAt === late,
+    )!;
+    expect(same).toBeDefined();
+    // A bus nine minutes behind is nine minutes behind all the way, which is what
+    // makes the connection after it judgeable at all.
+    expect(same.arriveAt).toBe(booked.arriveAt + 9);
+  });
+
+  it('drops a badly delayed bus down the ranking', () => {
+    const plans = planJourney(graph, from, to, {
+      departAt: noon,
+      liveEtas: reported(booked, booked.departAt + 40),
+    });
+
+    const top = plans[0].legs.find((l): l is BusLeg => l.kind === 'bus')!;
+    expect(scheduled[0].legs.find((l): l is BusLeg => l.kind === 'bus')!.route.code).toBe(
+      booked.route.code,
+    );
+    // Still offered, but no longer the option shown first.
+    expect(top.route.code).not.toBe(booked.route.code);
+  });
+
+  it('records the reading a departure was planned from', () => {
+    const plans = planJourney(graph, from, to, {
+      departAt: noon,
+      liveEtas: reported(booked, booked.departAt + 3, 'B42'),
+    });
+
+    const found = boardings(plans, booked).find((l) => l.departAt === booked.departAt + 3)!;
+    // The vehicle code is what lets the journey screen latch onto the right bus.
+    expect(found.liveEta?.vehicleCode).toBe('B42');
+  });
+
+  it('ignores a bus that has gone before the rider can reach the stop', () => {
+    const plans = planJourney(graph, from, to, {
+      departAt: noon,
+      liveEtas: reported(booked, noon - 5),
+    });
+
+    const found = boardings(plans, booked);
+    expect(found.some((l) => l.departAt === booked.departAt)).toBe(true);
+    // Nothing is claimed about the bus after the one that has been and gone.
+    expect(found.every((l) => l.liveEta === undefined)).toBe(true);
+  });
+
+  it('ignores a reading with no time stamped on it', () => {
+    const unstamped: LiveEtaIndex = new Map([
+      [booked.route.code, new Map([[booked.boardStop.code, { minutes: 4, vehicleCode: 'B7', label: '4 min' }]])],
+    ]);
+    const plans = planJourney(graph, from, to, { departAt: noon, liveEtas: unstamped });
+
+    expect(boardings(plans, booked).every((l) => l.departAt === booked.departAt)).toBe(true);
+  });
+});
+
 describe('parseEta', () => {
   it('reads the numeric form, including the trailing space RTL sends', () => {
     expect(parseEta('5 Minutes ')).toEqual({ minutes: 5, vehicleCode: '', label: '5 min' });
