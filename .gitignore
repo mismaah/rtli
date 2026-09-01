@@ -12,4 +12,8 @@ server/*.db-wal
 
 # Backend deployment settings (per-host)
 server/deploy.env
+
+# Backend database. Anchored to the repo root, which is where docker.sh puts it
+# by default; server/data covers a DATA_DIR that still points there.
+/data/
 server/data/

@@ -27,13 +27,22 @@ IMAGE="${IMAGE:-rtl-improved-backend}"
 CONTAINER="${CONTAINER:-rtld}"
 PORT="${PORT:-8080}"
 BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
-DATA_DIR="${DATA_DIR:-$PWD/server/data}"
+DATA_DIR="${DATA_DIR:-data}"
 # Must name the front end. Left as "*" this server is open for anyone to use as
 # their own free backend.
 ALLOW_ORIGIN="${ALLOW_ORIGIN:-*}"
 MAX_CONNECTIONS="${MAX_CONNECTIONS:-500}"
 MAX_PER_CLIENT="${MAX_PER_CLIENT:-20}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
+
+# Docker reads a bare relative path in --volume as the name of a *managed
+# volume*, not as a directory, so "data" would quietly put the database inside
+# Docker's own storage while leaving an empty data/ in the repo. Anchor anything
+# relative to the repo root instead, which is where it reads as pointing.
+case "$DATA_DIR" in
+  /*) ;;
+  *) DATA_DIR="$PWD/$DATA_DIR" ;;
+esac
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 warn() { printf '\033[33mwarning: %s\033[0m\n' "$1" >&2; }
@@ -77,7 +86,7 @@ fi
 #    passwd entry — it is statically linked.
 mkdir -p "$DATA_DIR"
 
-say "Starting $CONTAINER on ${BIND_ADDR}:${PORT}"
+say "Starting $CONTAINER on ${BIND_ADDR}:${PORT} (database in $DATA_DIR)"
 docker run -d \
   --name "$CONTAINER" \
   --restart unless-stopped \
