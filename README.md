@@ -326,9 +326,23 @@ cp server/deploy.env.example server/deploy.env   # then edit ALLOW_ORIGIN
 
 The image is a statically linked binary on `distroless/static` — 21 MB, no
 shell, no package manager. The container runs read-only, with all capabilities
-dropped, as the invoking user, so the mounted database directory needs no
-`chown`. The build happens before the running container is touched, so a broken
+dropped, and as the invoking user so the database stays inspectable without
+root. The build happens before the running container is touched, so a broken
 build leaves the current deployment up.
+
+Before starting, the script proves the container can write to the mounted
+directory by running `rtld -check` in a throwaway container. This is worth doing
+from *inside* a container because the ways a bind mount refuses to be written to
+are invisible from the host: a uid that does not line up, SELinux declining the
+mount, or rootless Docker remapping the container's user to a subuid that owns
+nothing. Ownership is fixed automatically; the other two are reported with what
+to do about them. `RUN_AS` and `VOLUME_OPTS` override the defaults — under
+rootless Docker, `RUN_AS=0:0` maps to the host user who owns the directory.
+
+The container also runs with `-require-store`, so a database it cannot open is
+a startup failure rather than a silent fallback. Run without that flag the
+server degrades to a cache and keeps serving, which is right at runtime and
+wrong for a deploy: it would report healthy while recording nothing.
 
 Three things about this shape are load-bearing:
 

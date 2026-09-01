@@ -189,3 +189,10 @@ func (db *DB) GetTimetable(ctx context.Context, serviceDate string) ([]byte, err
 	defer reader.Close()
 	return io.ReadAll(reader)
 }
+
+// DeleteTimetable removes one service date's stored timetable. Used by the
+// startup check to clean up after its write test.
+func (db *DB) DeleteTimetable(ctx context.Context, serviceDate string) error {
+	_, err := db.sql.ExecContext(ctx, `DELETE FROM day_timetable WHERE service_date = ?`, serviceDate)
+	return err
+}

@@ -34,6 +34,13 @@ ALLOW_ORIGIN="${ALLOW_ORIGIN:-*}"
 MAX_CONNECTIONS="${MAX_CONNECTIONS:-500}"
 MAX_PER_CLIENT="${MAX_PER_CLIENT:-20}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
+# The uid:gid the container runs as. Defaults to whoever runs this script, so
+# files on the mounted volume stay owned by them and need no root to inspect.
+RUN_AS="${RUN_AS:-$(id -u):$(id -g)}"
+# SELinux (Fedora, RHEL, Rocky) denies containers access to bind mounts unless
+# the directory is relabelled. ":Z" does that for this container's exclusive
+# use, and is ignored where SELinux is not enforcing.
+VOLUME_OPTS="${VOLUME_OPTS:-Z}"
 
 # Docker reads a bare relative path in --volume as the name of a *managed
 # volume*, not as a directory, so "data" would quietly put the database inside
@@ -81,25 +88,67 @@ else
   echo "nothing was running"
 fi
 
-# 4. Start. The data directory is owned by the invoking user and the container
-#    runs as that same uid, so the mount needs no chown and the binary needs no
-#    passwd entry — it is statically linked.
+# 4. Prove the container can actually write to the volume before starting it.
+#
+#    This is worth a throwaway container rather than a shell test, because the
+#    ways it fails are ones the host cannot see for itself: a uid that does not
+#    line up, SELinux refusing the mount, or rootless Docker remapping the
+#    container's user to a subuid that owns nothing. Getting this wrong used to
+#    surface as a server that started, reported healthy, and quietly recorded
+#    nothing.
 mkdir -p "$DATA_DIR"
+
+probe_writable() {
+  docker run --rm \
+    --user "$RUN_AS" \
+    --volume "${DATA_DIR}:/data:${VOLUME_OPTS}" \
+    --entrypoint /rtld \
+    "$IMAGE" -db /data/.probe.db -check -log-level error
+}
+
+cleanup_probe() {
+  rm -f "${DATA_DIR}/.probe.db" "${DATA_DIR}/.probe.db-wal" "${DATA_DIR}/.probe.db-shm" 2>/dev/null || true
+}
+
+say "Checking the database directory is writable"
+if ! probe_writable; then
+  # Nearly always ownership, and that is the one cause the host can fix itself.
+  echo "not writable as $RUN_AS — taking ownership of $DATA_DIR"
+  chown -R "$RUN_AS" "$DATA_DIR" 2>/dev/null \
+    || sudo chown -R "$RUN_AS" "$DATA_DIR" \
+    || die "could not change ownership of $DATA_DIR"
+
+  if ! probe_writable; then
+    cleanup_probe
+    printf '\n' >&2
+    echo "The container still cannot write to $DATA_DIR. The usual causes:" >&2
+    echo "  * SELinux (Fedora, RHEL, Rocky) — VOLUME_OPTS is '${VOLUME_OPTS}';" >&2
+    echo "    it should contain Z. Check with: ls -Zd $DATA_DIR" >&2
+    echo "  * rootless Docker — the container's user maps to a subuid that owns" >&2
+    echo "    nothing on the host. Try RUN_AS=0:0 in server/deploy.env." >&2
+    echo "  * a filesystem mounted read-only or with restrictive options." >&2
+    die "database directory is not writable by the container"
+  fi
+fi
+cleanup_probe
+echo "writable"
 
 say "Starting $CONTAINER on ${BIND_ADDR}:${PORT} (database in $DATA_DIR)"
 docker run -d \
   --name "$CONTAINER" \
   --restart unless-stopped \
-  --user "$(id -u):$(id -g)" \
+  --user "$RUN_AS" \
   --read-only \
+  --tmpfs /tmp \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   --memory 512m \
   --publish "${BIND_ADDR}:${PORT}:8080" \
-  --volume "${DATA_DIR}:/data" \
+  --volume "${DATA_DIR}:/data:${VOLUME_OPTS}" \
   "$IMAGE" \
   -addr :8080 \
   -db /data/rtld.db \
+  -require-store \
   -allow-origin "$ALLOW_ORIGIN" \
   -trust-proxy \
   -max-connections "$MAX_CONNECTIONS" \

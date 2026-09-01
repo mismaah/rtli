@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -36,6 +37,17 @@ func main() {
 			"treat CF-Connecting-IP / X-Forwarded-For as the real client; only safe when the sole route in is through that proxy")
 		maxConns = flag.Int("max-connections", envInt("RTLD_MAX_CONNECTIONS", hub.DefaultMaxConnections), "maximum concurrent SSE connections")
 		maxPer   = flag.Int("max-per-client", envInt("RTLD_MAX_PER_CLIENT", hub.DefaultMaxPerClient), "maximum concurrent SSE connections per client address")
+		// Without this a storage failure is survivable: the server still works
+		// as a cache. That is the right runtime behaviour and the wrong
+		// deployment outcome — a deploy that quietly stops recording history
+		// looks healthy while losing exactly what it was deployed for.
+		requireStore = flag.Bool("require-store", envOr("RTLD_REQUIRE_STORE", "") == "1",
+			"exit rather than run cache-only when the database cannot be opened")
+		// A preflight for deployment: the ways a mounted volume refuses to be
+		// written to — a mismatched uid, SELinux, rootless subuid remapping —
+		// are not visible from the host, so the only honest test is to try it
+		// from inside the container that will do the writing.
+		check = flag.Bool("check", false, "open the database, verify it is writable, and exit")
 	)
 	flag.Parse()
 
@@ -44,6 +56,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *check {
+		if err := checkStore(ctx, *dbPath); err != nil {
+			log.Error("store check failed", "path", *dbPath, "err", err)
+			os.Exit(1)
+		}
+		log.Info("store check passed", "path", *dbPath)
+		return
+	}
 
 	client := rtl.NewClient(*upstream)
 	options := api.Options{
@@ -66,6 +87,11 @@ func main() {
 	if *dbPath != "" {
 		db, err := store.Open(ctx, *dbPath)
 		if err != nil {
+			if *requireStore {
+				log.Error("could not open the store", "path", *dbPath, "err", err,
+					"hint", "check the mounted directory is writable by this container's user")
+				os.Exit(1)
+			}
 			log.Error("could not open the store; running as a cache only", "path", *dbPath, "err", err)
 		} else {
 			defer db.Close()
@@ -118,6 +144,25 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("stopped")
+}
+
+// checkStore opens the database and writes to it, then cleans up after itself.
+// Opening alone is not proof: SQLite will happily open a file it cannot later
+// write, and it is the write that fails in production.
+func checkStore(ctx context.Context, path string) error {
+	if path == "" {
+		return nil // No store configured; nothing to check.
+	}
+	db, err := store.Open(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if err := db.PutTimetable(ctx, "0000-00-00", []byte("{}")); err != nil {
+		return fmt.Errorf("write test: %w", err)
+	}
+	return db.DeleteTimetable(ctx, "0000-00-00")
 }
 
 func envInt(key string, fallback int) int {

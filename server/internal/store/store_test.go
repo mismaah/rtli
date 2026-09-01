@@ -241,3 +241,31 @@ func TestPruneIsIdempotent(t *testing.T) {
 		t.Errorf("prune passes removed %d then %d, want 1 then 0", first.Fixes, second.Fixes)
 	}
 }
+
+func TestDeleteTimetable(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+
+	if err := db.PutTimetable(ctx, "2026-09-01", []byte(`{"v":1}`)); err != nil {
+		t.Fatalf("PutTimetable: %v", err)
+	}
+	if err := db.DeleteTimetable(ctx, "2026-09-01"); err != nil {
+		t.Fatalf("DeleteTimetable: %v", err)
+	}
+	got, err := db.GetTimetable(ctx, "2026-09-01")
+	if err != nil {
+		t.Fatalf("GetTimetable: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %d bytes after delete, want nil", len(got))
+	}
+}
+
+// The startup check writes and deletes a row; deleting one that is not there
+// must not be an error, or a half-finished check would wedge the next deploy.
+func TestDeleteMissingTimetableIsNotAnError(t *testing.T) {
+	db := openTest(t)
+	if err := db.DeleteTimetable(t.Context(), "1999-01-01"); err != nil {
+		t.Errorf("DeleteTimetable on a missing day = %v, want nil", err)
+	}
+}
