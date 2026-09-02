@@ -232,11 +232,20 @@ whole thing.
 
 **Every client polls independently.** A single phone on the trip screen can issue
 ~50 requests a minute. One server loop serves everyone — and only polls tightly
-for routes somebody is actually watching, so idle load stays near 45 req/min for
+for routes somebody is actually watching, so idle load stays near 90 req/min for
 the whole network rather than rising per user.
 
 **No history exists.** The 15-minute headway assumed for R10, R11, R12 and R15 is
 a guess. Recorded movement turns it into a measurement.
+
+Positions are recorded raw and then distilled, twice a day's worth per hour, into
+what outlives them: when each bus reached each stop, how long each ride between
+adjacent stops took, and how long a rider waited between buses. The distillation
+works by reducing both the bus and the stops to a distance along the route, so an
+arrival is the moment one passes the other — timed by interpolating between the
+two positions either side of it, rather than by waiting for a position to happen
+to land near the stop. Raw positions are pruned after weeks; what was learned
+from them is kept for months.
 
 #### What the poll rate actually is
 
@@ -250,6 +259,14 @@ So the server does not poll faster to get more data; there is none. It polls at
 3 s to notice a change *sooner*, and pushes it over SSE. A 10 s poll sits at a
 random phase against an 11 s cycle and is ~5.5 s stale on average, which at 64 m
 per update is roughly 30 m of error. Streaming cuts that to ~1.5 s.
+
+Routes nobody is watching are polled every 10 s rather than dropped to a trickle,
+which is about the recorder rather than about display. The archive is meant to be
+compared across routes and hours, so its resolution cannot be allowed to track
+route popularity: an unwatched route sampled at 20 s against an 11 s feed loses
+half its fixes, and loses them unevenly. Matching the floor to the upstream
+cadence costs ~90 req/min network-wide, comfortably inside the 3 req/s the
+upstream was measured to sustain.
 
 Smoothness comes from the client, not the network: markers glide between two
 *known* fixes over 900 ms. That is catch-up interpolation, never extrapolation —

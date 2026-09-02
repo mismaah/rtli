@@ -5,8 +5,14 @@
 // Here, one loop per route serves everyone — but a naive "poll all 15 routes
 // every 3 s" would be 300 requests a minute even with nobody connected, which is
 // worse than the status quo below roughly seven concurrent users. So the
-// interval follows demand: tight for routes someone is actually watching, slow
-// for the rest, and nothing at all overnight when no bus reports.
+// interval follows demand: tight for routes someone is actually watching, and
+// nothing at all overnight when no bus reports.
+//
+// It does not follow demand all the way down, though. Every poll also feeds the
+// recorder, and an archive whose resolution tracks route popularity is not one
+// you can compare buckets across, so the unwatched interval is a floor set by
+// the upstream cadence rather than by whether anyone is looking. See
+// IdleInterval.
 package poller
 
 import (
@@ -29,8 +35,22 @@ const (
 	// Measured upstream cadence is ~11 s, so this is not about collecting more
 	// positions — there are none — but about noticing one promptly.
 	WatchedInterval = 3 * time.Second
-	// IdleInterval keeps the history fed for routes nobody is watching.
-	IdleInterval = 20 * time.Second
+	// IdleInterval is the recording floor: how often a route nobody is watching
+	// is still polled, so that the history being built does not depend on who
+	// happened to be looking at the time.
+	//
+	// Matched to the ~11 s upstream cadence rather than set by demand. At 20 s
+	// the first day's archive came out under-sampled roughly 2x — recorded gaps
+	// clustered at 15–30 s against a feed publishing every 11 — and worse for
+	// less popular routes, which is exactly backwards for a corpus meant to be
+	// uniform. Demand-led intervals are right for *serving* clients and wrong
+	// for *building* one.
+	//
+	// The cost is ~84 req/min for 14 routes (1.4 req/s) against ~42 before,
+	// still inside the 3 req/s that upstream was measured to sustain without
+	// failures. Do not tighten it past the upstream cadence: below ~11 s the
+	// extra requests return coordinates that have not changed.
+	IdleInterval = 10 * time.Second
 	// ETAs change roughly once per 30 s upstream, so this loses nothing.
 	EtaInterval = 15 * time.Second
 )
@@ -50,7 +70,7 @@ const (
 // like a live picture, and inconsistent with /v1/live, which refuses a position
 // older than 30 seconds.
 //
-// Comfortably longer than the 20 s idle poll interval, so an unwatched route's
+// Comfortably longer than the idle poll interval, so an unwatched route's
 // perfectly good position is never discarded for being one cycle old.
 const TrackMaxAge = 5 * time.Minute
 
@@ -64,6 +84,7 @@ type Poller struct {
 	mu     sync.RWMutex
 	tracks map[string]map[string]*track.Track // routeCode -> busCode -> track
 	shapes map[string][][]geo.Point           // routeCode -> polylines
+	stops  map[string][]rtl.Stop              // routeCode -> stops in route order
 
 	routes atomic.Pointer[[]string]
 }
@@ -79,6 +100,7 @@ func New(client *rtl.Client, broker *hub.Hub, db *store.DB, log *slog.Logger) *P
 		log:    log,
 		tracks: make(map[string]map[string]*track.Track),
 		shapes: make(map[string][][]geo.Point),
+		stops:  make(map[string][]rtl.Stop),
 	}
 	empty := []string{}
 	p.routes.Store(&empty)

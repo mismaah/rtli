@@ -22,6 +22,7 @@ import (
 	"github.com/mismaah/rtl-improved/server/internal/api"
 	"github.com/mismaah/rtl-improved/server/internal/hub"
 	"github.com/mismaah/rtl-improved/server/internal/poller"
+	"github.com/mismaah/rtl-improved/server/internal/rollup"
 	"github.com/mismaah/rtl-improved/server/internal/rtl"
 	"github.com/mismaah/rtl-improved/server/internal/store"
 )
@@ -101,10 +102,16 @@ func main() {
 			live := poller.New(client, broker, db, log)
 			go live.Run(ctx)
 
+			// The rollup has to outlive nothing and precede everything: raw
+			// fixes are pruned at RawRetention and the aggregates derived from
+			// them are not, so a fix that expires unrolled is simply lost.
+			go rollup.NewJob(db, live, log).Run(ctx)
+
 			options.Hub = broker
 			options.Poller = live
 			log.Info("history and live streaming enabled", "db", *dbPath,
-				"rawRetention", store.RawRetention, "aggregateRetention", store.AggregateRetention)
+				"rawRetention", store.RawRetention, "aggregateRetention", store.AggregateRetention,
+				"rollupInterval", rollup.Interval)
 		}
 	}
 

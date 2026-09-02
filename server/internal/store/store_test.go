@@ -366,3 +366,111 @@ func TestInsertKeepsRawAndSnappedApart(t *testing.T) {
 		t.Errorf("snapped = (%v, %v), want (4.1701, 73.5002)", snapLat, snapLng)
 	}
 }
+
+// Every bucketed column is Malé civil time. A bus arriving at 01:30 Malé is an
+// hour-1 arrival on a Thursday, not a 20:30 Wednesday one, and getting this
+// wrong would scatter each evening's late running into the wrong bucket.
+func TestAggregatesBucketInMaleTime(t *testing.T) {
+	db := openTest(t)
+
+	// 2026-09-02T20:30:00Z is 01:30 on Thursday 3 September in Malé.
+	at := time.Date(2026, 9, 2, 20, 30, 0, 0, time.UTC).UnixMilli()
+	if err := db.ReplaceAggregates(t.Context(), "133", at-1000, at+1000,
+		[]Arrival{{RouteCode: "133", StopCode: "103", BusCode: "C1", AtMs: at}},
+		[]Segment{{RouteCode: "133", FromStop: "103", ToStop: "304", AtMs: at, Secs: 90}},
+		[]Headway{{RouteCode: "133", StopCode: "103", AtMs: at, Secs: 600}}); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+
+	for _, table := range []string{"stop_arrival", "segment_obs", "headway_obs"} {
+		var dow, hour int
+		if err := db.sql.QueryRowContext(t.Context(),
+			`SELECT dow, hour FROM `+table).Scan(&dow, &hour); err != nil {
+			t.Fatalf("%s: %v", table, err)
+		}
+		if dow != 4 || hour != 1 {
+			t.Errorf("%s bucketed at dow=%d hour=%d, want Thursday (4) at 01:00", table, dow, hour)
+		}
+	}
+}
+
+// A rollup is a pure function of the fixes in its window, so re-running it must
+// replace rather than accumulate. Appending would multiply every observation by
+// the number of passes that had seen it.
+func TestReplaceAggregatesIsIdempotent(t *testing.T) {
+	db := openTest(t)
+	at := time.Now().UnixMilli()
+
+	write := func() {
+		t.Helper()
+		if err := db.ReplaceAggregates(t.Context(), "133", at-1000, at+1000,
+			[]Arrival{{RouteCode: "133", StopCode: "103", BusCode: "C1", AtMs: at}},
+			[]Segment{{RouteCode: "133", FromStop: "103", ToStop: "304", AtMs: at, Secs: 90}},
+			[]Headway{{RouteCode: "133", StopCode: "103", AtMs: at, Secs: 600}}); err != nil {
+			t.Fatalf("ReplaceAggregates: %v", err)
+		}
+	}
+	write()
+	write()
+	write()
+
+	stats, err := db.Stats(t.Context())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Arrivals != 1 || stats.Segments != 1 || stats.Headways != 1 {
+		t.Errorf("after three passes: arrivals=%d segments=%d headways=%d, want 1 each",
+			stats.Arrivals, stats.Segments, stats.Headways)
+	}
+}
+
+// Replacing one window must not disturb another. A rollup of today re-runs every
+// half hour; if it cleared more than its own window it would erase the history
+// it exists to build.
+func TestReplaceAggregatesLeavesOtherWindowsAlone(t *testing.T) {
+	db := openTest(t)
+	yesterday := time.Now().Add(-24 * time.Hour).UnixMilli()
+	today := time.Now().UnixMilli()
+
+	if err := db.ReplaceAggregates(t.Context(), "133", yesterday-1000, yesterday+1000,
+		[]Arrival{{RouteCode: "133", StopCode: "103", BusCode: "C1", AtMs: yesterday}}, nil, nil); err != nil {
+		t.Fatalf("seed yesterday: %v", err)
+	}
+	if err := db.ReplaceAggregates(t.Context(), "133", today-1000, today+1000,
+		[]Arrival{{RouteCode: "133", StopCode: "103", BusCode: "C2", AtMs: today}}, nil, nil); err != nil {
+		t.Fatalf("write today: %v", err)
+	}
+
+	stats, err := db.Stats(t.Context())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Arrivals != 2 {
+		t.Errorf("arrivals = %d, want 2 (yesterday's kept alongside today's)", stats.Arrivals)
+	}
+}
+
+func TestFixesForRouteReturnsTheSnappedPositionInWindow(t *testing.T) {
+	db := openTest(t)
+	at := time.Now().UnixMilli()
+
+	if err := db.InsertFixes(t.Context(), []Fix{
+		{RouteCode: "133", BusCode: "C1", AtMs: at - 10_000, Lat: 4.17, Lng: 73.50,
+			SnapLat: ptr(4.1701), SnapLng: ptr(73.5002)},
+		{RouteCode: "133", BusCode: "C1", AtMs: at + 10_000, Lat: 4.18, Lng: 73.51},
+		{RouteCode: "999", BusCode: "C9", AtMs: at, Lat: 4.19, Lng: 73.52},
+	}); err != nil {
+		t.Fatalf("InsertFixes: %v", err)
+	}
+
+	got, err := db.FixesForRoute(t.Context(), "133", at-20_000, at)
+	if err != nil {
+		t.Fatalf("FixesForRoute: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d fixes, want the single one inside the window", len(got))
+	}
+	if got[0].Lat != 4.1701 || got[0].Lng != 73.5002 {
+		t.Errorf("got the raw reading (%v, %v), want the snapped position", got[0].Lat, got[0].Lng)
+	}
+}

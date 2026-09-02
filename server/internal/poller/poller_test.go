@@ -133,7 +133,7 @@ func TestSnapshotWithholdsStalePositions(t *testing.T) {
 	}
 }
 
-// A route polled on the slow idle interval is routinely ~20 s old; that is
+// A route polled on the slow idle interval is routinely one cycle old; that is
 // perfectly good data and must not be discarded.
 func TestIdleIntervalPositionsAreNotConsideredStale(t *testing.T) {
 	p := newTestPoller(t)
@@ -190,5 +190,33 @@ func TestPruneIsSafeWhenNothingIsStale(t *testing.T) {
 	}
 	if len(p.tracksAt("133", now)) != 1 {
 		t.Error("a fresh track went missing")
+	}
+}
+
+// The recording floor trades upstream load for archive quality, and both halves
+// of that trade have to keep holding.
+//
+// Tight enough that the history is not under-sampled against the ~11 s feed:
+// the first day ran at 20 s and produced recorded gaps clustered at 15–30 s,
+// roughly half the resolution available. Loose enough to stay inside the request
+// rate upstream was measured to sustain without failures.
+func TestIdleIntervalStaysWithinTheMeasuredBudget(t *testing.T) {
+	const (
+		// Measured per-bus GPS cadence. Polling faster than this returns the
+		// same coordinates.
+		upstreamCadence = 11 * time.Second
+		// The whole network, polled every IdleInterval with nobody connected.
+		routes = 15
+		// Measured sustained against RTL with no failures.
+		toleratedPerSec = 3.0
+	)
+
+	if IdleInterval > upstreamCadence {
+		t.Errorf("idle interval %v is looser than the %v upstream cadence; the archive would be under-sampled",
+			IdleInterval, upstreamCadence)
+	}
+	if perSec := routes / IdleInterval.Seconds(); perSec > toleratedPerSec {
+		t.Errorf("idle load %.2f req/s exceeds the %.1f req/s upstream was measured to sustain",
+			perSec, toleratedPerSec)
 	}
 }

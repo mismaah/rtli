@@ -2,8 +2,10 @@
 --
 -- Two tiers, because raw positions are bulky and short-lived while what is
 -- learned from them is small and worth keeping. Measured over a full day in
--- production: ~63k fixes at ~150 bytes, so ~9.5 MB/day. Raw data is pruned at
--- store.RawRetention while the aggregates derived from it survive 90 days.
+-- production: ~63k fixes at ~150 bytes, so ~9.5 MB/day — at the 20 s recording
+-- floor that day ran on. The floor is now 10 s, so expect roughly double. Raw
+-- data is pruned at store.RawRetention while the aggregates derived from it
+-- survive 90 days.
 --
 -- Every day/hour column is Malé civil time (UTC+05:00, no DST), matching
 -- serviceDate() in src/lib/time.ts. If these ever disagree the day buckets here

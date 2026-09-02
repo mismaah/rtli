@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/mismaah/rtl-improved/server/internal/geo"
+	"github.com/mismaah/rtl-improved/server/internal/rtl"
 )
 
 // loadRoutes discovers the route list and each route's geometry.
@@ -24,6 +25,12 @@ func (p *Poller) loadRoutes(ctx context.Context) error {
 			continue
 		}
 		codes = append(codes, route.Code)
+		// Kept for the rollup, which needs to know where the stops are in
+		// order to say when a bus reached one. This response is the only place
+		// that pairs a stop's coordinates with its position in the route.
+		p.mu.Lock()
+		p.stops[route.Code] = route.BusRouteStopList
+		p.mu.Unlock()
 	}
 	p.routes.Store(&codes)
 	p.log.Info("routes loaded", "count", len(codes))
@@ -68,4 +75,20 @@ func (p *Poller) refreshRoutesDaily(ctx context.Context) {
 // Routes returns the discovered route codes.
 func (p *Poller) Routes() []string {
 	return *p.routes.Load()
+}
+
+// RouteGeometry returns a route's polylines, if its shape loaded.
+func (p *Poller) RouteGeometry(routeCode string) ([][]geo.Point, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	lines, ok := p.shapes[routeCode]
+	return lines, ok
+}
+
+// RouteStops returns a route's stops in their published order.
+func (p *Poller) RouteStops(routeCode string) ([]rtl.Stop, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	stops, ok := p.stops[routeCode]
+	return stops, ok
 }

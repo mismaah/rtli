@@ -33,7 +33,11 @@ var schema string
 // does not exist yet. Until it does, deleting a fix deletes the only copy of
 // what it could have taught, and the ETA-correction work needs weeks of it.
 // Drop this back to 7 days once the rollup is running and has backfilled.
-// At the measured ~9.5 MB/day this is ~570 MB rather than ~66 MB.
+//
+// Sizing: day one measured ~9.5 MB/day at the old 20 s recording floor. The
+// floor is now 10 s and a moving bus clears the jitter radius within either
+// interval, so expect roughly double — ~19 MB/day, so ~1.1 GB at 60 days
+// against ~130 MB at 7. Worth re-measuring after a day at the new rate.
 const (
 	RawRetention       = 60 * 24 * time.Hour
 	AggregateRetention = 90 * 24 * time.Hour
@@ -237,4 +241,153 @@ func (db *DB) GetTimetable(ctx context.Context, serviceDate string) ([]byte, err
 func (db *DB) DeleteTimetable(ctx context.Context, serviceDate string) error {
 	_, err := db.sql.ExecContext(ctx, `DELETE FROM day_timetable WHERE service_date = ?`, serviceDate)
 	return err
+}
+
+// MaleOffset is Malé's fixed civil offset. UTC+05:00, no DST, ever — the same
+// assumption ServiceDate and serviceDate() in src/lib/time.ts are built on.
+const MaleOffset = 5 * time.Hour
+
+// maleBucket returns the day-of-week (0=Sunday) and hour a moment falls in,
+// in Malé civil time. Every bucketed column in this schema uses these, so a
+// median "for a Tuesday at 08:00" means a Tuesday morning in Malé rather than
+// wherever the server happens to be.
+func maleBucket(atMs int64) (dow, hour int) {
+	t := time.UnixMilli(atMs).UTC().Add(MaleOffset)
+	return int(t.Weekday()), t.Hour()
+}
+
+// Arrival is one bus reaching one stop. TripOrder, SchedMin and DeltaMin stay
+// nil until there is a stored timetable to compare against.
+type Arrival struct {
+	RouteCode string
+	StopCode  string
+	BusCode   string
+	AtMs      int64
+	TripOrder *int
+	SchedMin  *float64
+	DeltaMin  *float64
+}
+
+// Segment is one observed ride between two adjacent stops.
+type Segment struct {
+	RouteCode string
+	FromStop  string
+	ToStop    string
+	AtMs      int64
+	Secs      float64
+}
+
+// Headway is one observed wait between successive buses at a stop.
+type Headway struct {
+	RouteCode string
+	StopCode  string
+	AtMs      int64
+	Secs      float64
+}
+
+// FixRow is a recorded position, read back for rolling up. The snapped position
+// is the one returned: it is what was matched to the route when it was recorded,
+// so re-deriving from the raw reading would answer a different question.
+type FixRow struct {
+	BusCode string
+	AtMs    int64
+	Lat     float64
+	Lng     float64
+}
+
+// FixesForRoute returns one route's positions over [fromMs, toMs), oldest first.
+func (db *DB) FixesForRoute(ctx context.Context, routeCode string, fromMs, toMs int64) ([]FixRow, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT bus_code, at_ms, COALESCE(snap_lat, lat), COALESCE(snap_lng, lng)
+		FROM bus_fix
+		WHERE route_code = ? AND at_ms >= ? AND at_ms < ?
+		ORDER BY bus_code, at_ms`, routeCode, fromMs, toMs)
+	if err != nil {
+		return nil, fmt.Errorf("fixes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []FixRow
+	for rows.Next() {
+		var f FixRow
+		if err := rows.Scan(&f.BusCode, &f.AtMs, &f.Lat, &f.Lng); err != nil {
+			return nil, fmt.Errorf("fixes: %w", err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// ReplaceAggregates swaps in a freshly derived set of aggregates for one route
+// over one window, in a single transaction.
+//
+// Replace rather than append, because a rollup is a pure function of the fixes
+// in the window and re-running it must not double the record. The window is
+// cleared first: stop_arrival could lean on its unique constraint, but the
+// interpolated timestamp shifts by a second or two when the same day is rolled
+// up again after more fixes have landed, so the constraint would let near
+// duplicates through.
+func (db *DB) ReplaceAggregates(ctx context.Context, routeCode string, fromMs, toMs int64,
+	arrivals []Arrival, segments []Segment, headways []Headway) error {
+
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, clear := range []string{
+		`DELETE FROM stop_arrival WHERE route_code = ? AND at_ms >= ? AND at_ms < ?`,
+		`DELETE FROM segment_obs  WHERE route_code = ? AND at_ms >= ? AND at_ms < ?`,
+		`DELETE FROM headway_obs  WHERE route_code = ? AND at_ms >= ? AND at_ms < ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, clear, routeCode, fromMs, toMs); err != nil {
+			return fmt.Errorf("clear aggregates: %w", err)
+		}
+	}
+
+	arrivalStmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO stop_arrival
+		(route_code, stop_code, bus_code, at_ms, trip_order, sched_min, delta_min, dow, hour)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer arrivalStmt.Close()
+	for _, a := range arrivals {
+		dow, hour := maleBucket(a.AtMs)
+		if _, err := arrivalStmt.ExecContext(ctx, a.RouteCode, a.StopCode, a.BusCode, a.AtMs,
+			a.TripOrder, a.SchedMin, a.DeltaMin, dow, hour); err != nil {
+			return fmt.Errorf("insert arrival: %w", err)
+		}
+	}
+
+	segmentStmt, err := tx.PrepareContext(ctx, `INSERT INTO segment_obs
+		(route_code, from_stop, to_stop, at_ms, secs, dow, hour) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer segmentStmt.Close()
+	for _, s := range segments {
+		dow, hour := maleBucket(s.AtMs)
+		if _, err := segmentStmt.ExecContext(ctx, s.RouteCode, s.FromStop, s.ToStop,
+			s.AtMs, s.Secs, dow, hour); err != nil {
+			return fmt.Errorf("insert segment: %w", err)
+		}
+	}
+
+	headwayStmt, err := tx.PrepareContext(ctx, `INSERT INTO headway_obs
+		(route_code, stop_code, at_ms, secs, dow, hour) VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer headwayStmt.Close()
+	for _, h := range headways {
+		dow, hour := maleBucket(h.AtMs)
+		if _, err := headwayStmt.ExecContext(ctx, h.RouteCode, h.StopCode,
+			h.AtMs, h.Secs, dow, hour); err != nil {
+			return fmt.Errorf("insert headway: %w", err)
+		}
+	}
+
+	return tx.Commit()
 }

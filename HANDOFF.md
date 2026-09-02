@@ -34,19 +34,33 @@ push with server-side snapping and heading inference, client fallback ladder.
 **Not built:** server-side full-day timetable accumulation, and historical ETA
 correction. See *Remaining work* below.
 
-### Uncommitted, not yet deployed (2026-09-02 afternoon)
+### Not yet deployed (2026-09-02 afternoon)
 
 The first day's database was pulled off the server after ~14 hours and read.
-That review produced four fixes, which are **in the working tree and green but
-not committed and not on the server**:
+That review produced five changes. **None of them is on the server yet** — the
+running container is still `c2148c8`.
+
+Committed as `b7dcc01`:
 
 1. `RawRetention` 7 days → **60 days**. Stopgap; see *Remaining work*.
 2. A coordinate plausibility gate in **both** track implementations.
 3. Raw coordinates actually persisted, rather than the snap twice.
 4. `auto_vacuum` repaired on open, and the pragma ordering that broke it fixed.
 
-Deploy 4 sooner rather than later: it does a one-time `VACUUM`, which took 307 ms
-on the 5 MB file and gets slower as 60-day retention grows it.
+Still in the working tree:
+
+5. `IdleInterval` 20 s → **10 s**, the recording floor decided below, plus the
+   README and this file brought in line with it.
+6. **The rollup exists** — `server/internal/rollup/`, wired in `main.go`. The
+   three aggregate tables are no longer dead schema.
+
+Two things to know before `./docker.sh`:
+
+- **4 does a one-time `VACUUM` on open** — 307 ms on the 5 MB file, slower as
+  60-day retention grows it, so sooner is cheaper. It runs in the `rtld -check`
+  preflight container rather than at service start.
+- **5 roughly doubles the recorder's disk rate** to ~19 MB/day, so ~1.1 GB at
+  60-day retention. Check the home server has the room first.
 
 ---
 
@@ -64,8 +78,8 @@ counter-intuitive and a fresh session is likely to get them wrong.
 | Fleet | ~37 buses, 15 routes, 101 stops | The whole problem is small. Over a full day it is **43 distinct buses across 14 routes** — 14 of those buses serve more than one route, so bus→route is not stable and arrival matching must not assume it. The 15th route ran no buses at all that day, which is what `route_activity` exists to record. |
 | Upstream RTT | ~190 ms | Fan-in polling is cheap. |
 | Tolerated rate | 3 req/s sustained, no failures | Fan-in is within what upstream already serves. |
-| Recorded fixes | **~63k/day at ~150 B** ≈ 9.5 MB/day | Measured over the first full day, not estimated. The schema's old "242k/day at 72 bytes, ~17 MB/day" guess was wrong in both directions. |
-| **Stored** cadence | **15–30 s** for 29,015 of 37,260 gaps | Not the 11 s upstream offers. Nobody was watching, so every route sat on `IdleInterval`. The archive is under-sampled ~2x, and *more so the less popular the route*. See *Remaining work*. |
+| Recorded fixes | **~63k/day at ~150 B** ≈ 9.5 MB/day | Measured over the first full day, not estimated — the schema's old "242k/day at 72 bytes, ~17 MB/day" guess was wrong in both directions. Measured at the **20 s** floor though; at the 10 s floor now in the tree, expect ~2x. |
+| **Stored** cadence | **15–30 s** for 29,015 of 37,260 gaps | Measured on day one, when `IdleInterval` was 20 s and nobody was watching: the archive came out under-sampled ~2x against the 11 s feed, and *more so the less popular the route*. Fixed by dropping the floor to 10 s — re-measure after a day at the new rate before trusting this row again. |
 | Snap quality | offset p50 **2.5 m**, p90 7.7 m, p99 27 m | 133 rows of 37,303 over 100 m. The 40/120 m taper is well chosen; leave it alone. |
 | Uptime, first day | No fleet-wide silence >90 s in service hours | The three gaps >90 s are all 04:25–04:55, when only ~5 buses were reporting. |
 | Service hours | Buses report ~04:00–01:00 Malé | Zero buses observed at 00:01, buses again at 00:35 — service **does** run past midnight, so the window stays open to 01:00. |
@@ -119,6 +133,7 @@ server/
     poller/         demand-led fan-in polling, snap → infer → publish → record
     hub/            SSE broadcast, route subscriptions, connection caps
     store/          SQLite, tiered retention
+    rollup/         linear referencing; fixes -> arrivals, segments, headways
     cache/          single-flight TTL memo with a stale bound
     api/            handlers, CORS allowlist, real-IP resolution
 ```
@@ -136,9 +151,17 @@ server/
    `src/api/rtl.ts` (all four fetchers funnel through one helper) plus a circuit
    breaker in `src/api/backend.ts`.
 
-**Adaptive polling:** watched routes 3 s, unwatched 20 s, nothing 01:00–03:59.
-Idle load ~45 req/min for the whole network. A naive "all routes every 3 s" would
-be 300 req/min and worse than the status quo below ~7 concurrent users.
+**Adaptive polling:** watched routes 3 s, unwatched 10 s, nothing 01:00–03:59.
+Idle load ~90 req/min (1.5 req/s) for the whole network, inside the 3 req/s
+upstream was measured to sustain. A naive "all routes every 3 s" would be
+300 req/min and worse than the status quo below ~7 concurrent users.
+
+The unwatched interval is a **recording floor, not a demand tier** — it is set by
+the ~11 s upstream cadence rather than by whether anyone is looking, because
+every poll also feeds the recorder and an archive whose resolution tracks route
+popularity cannot be compared across buckets. Do not "save requests" by raising
+it back without also deciding the history no longer matters.
+`TestIdleIntervalStaysWithinTheMeasuredBudget` pins both ends of that trade.
 
 ---
 
@@ -236,29 +259,89 @@ Do not attribute it to backend changes without re-establishing a baseline.
 
 ## Remaining work
 
-**Milestone 4.5 — the rollup. Nothing writes the aggregate tables.** This is the
-one to do first, and it is not what the original plan assumed.
+**Milestone 4.5 — the rollup. Built, not yet deployed.** `internal/rollup/`,
+started from `main.go` alongside the poller and retention.
 
-`stop_arrival`, `segment_obs` and `headway_obs` exist as schema, are pruned by
-`retention.go`, and are counted by `Stats` — and **no code inserts into any of
-them**. `store.go` exports only `InsertFixes`, `RecordActivity` and the three
-timetable methods. After 14 hours of production the first day's counts were:
+The problem it solves: `stop_arrival`, `segment_obs` and `headway_obs` existed as
+schema, were pruned by `retention.go` and counted by `Stats` — and nothing ever
+inserted into any of them. After 14 hours of production the first day's counts
+were `bus_fix` 37,303 and all three aggregates 0. `Prune` carries the comment
+*"rollups must already have run, because once a fix is deleted what it could
+have taught is gone"*, and none did. At the original `RawRetention = 7 days`,
+Milestone 5's "weeks of recorded history" would have restarted at zero every
+week, forever.
 
-```
-bus_fix        37,303      route_activity  14
-stop_arrival        0      day_timetable    0
-segment_obs         0      headway_obs      0
-```
+**How it works, and the two things that are not obvious.**
 
-`Prune` carries the comment *"rollups must already have run, because once a fix
-is deleted what it could have taught is gone"* — and no rollup exists. With the
-original `RawRetention = 7 days`, every day's fixes were being deleted a week
-later, so Milestone 5's "weeks of recorded history" would have restarted at zero
-every week, forever.
+Arrivals come from *linear referencing*, not proximity: bus and stops are both
+reduced to a distance along the route, and an arrival is the moment the bus's
+distance passes the stop's, interpolated between the two fixes that straddle it.
+Proximity fails here because the recorder is sparse by design — a bus covers a
+median 64 m between fixes — so "was a fix ever near this stop" misses passes
+outright and times the rest to wherever a fix happened to land.
 
-`RawRetention` is now **60 days** as a stopgap — enough runway to write the
-rollup and backfill from fixes that still exist. **Put it back to 7 once the
-rollup runs and has backfilled**; 60 days is ~570 MB against ~66 MB.
+1. **A stop's position on the line is ambiguous, and route order is what
+   resolves it.** Every loop terminal and every inbound/outbound twin gives a
+   stop two equally good projections. Resolved independently, R1's stop 18 lands
+   at 145 m — the *start* of the line — and its stop 4 lands on top of stop 15.
+   `ResolveStops` walks the stops in published order and always takes the first
+   projection ahead of the previous one, which puts stop 18 at 17,937 m of a
+   17,968 m line and makes the whole sequence monotonic. Everything downstream
+   assumes that monotonicity. `Line.Candidates` returning *all* the projections
+   rather than the nearest is the load-bearing part; if it is ever "simplified"
+   to return one, the ordering has nothing left to work with.
+
+2. **A bus laying over re-crosses the stop it is parked at.** It drifts a few
+   metres either side, and every forward twitch counts again — 37 real arrivals
+   at R1's terminal became 53. Suppressed by refusing the same stop twice in a
+   row for a bus, since a bus works through stops in order.
+
+**Verified against the real first day** (route 133, 5,923 fixes): 662 arrivals,
+617 segments, 630 headways. Every stop records 36-38 arrivals — near-identical
+counts across the route is the internal consistency check worth re-running after
+any change, because each lap passes every stop exactly once. Segment times come
+out p50 113 s, headways p50 16.8 min. A pass over one route-day takes ~330 ms,
+so ~5 s for 15 routes, every 30 minutes.
+
+**The known, deliberate gap.** One stop — the one just past the terminal —
+records 31 rather than 37. Interpolation is refused across silences longer than
+`MaxInterpolateGapMs` (5 min), and 27 of the 31 legs rejected on the first day
+were terminal layovers: median travel -12 m across a median 12.7 minutes. Those
+legs do contain a real crossing, but a bus that stood still for twelve minutes
+and then drove past in the last thirty seconds would have that arrival
+interpolated minutes early, and early by a *consistent* amount — the one error a
+median cannot wash out. **Do not "fix" this by widening the gap.** Fewer
+correctly timed arrivals beat more systematically wrong ones when the whole point
+downstream is correcting predictions by minutes.
+
+**The startup race, which is easy to reintroduce.** The job and the poller start
+together and the poller discovers its route list over the network, so the job's
+first pass routinely runs with no routes at all. `Once` therefore retires the
+previous service day *only* if the pass actually processed a route — otherwise a
+restart at 05:00 would retire yesterday having derived nothing from it and never
+revisit it. `TestJobDoesNotRetireADayItCouldNotRollUp` fails if that guard is
+removed.
+
+**Still to do here:** `trip_order`, `sched_min` and `delta_min` are written NULL,
+because there is no stored timetable to compare against. That is Milestone 4.
+
+**Only route 133 has ever been checked against real geometry** — it is the only
+shape in `test/fixtures/`. The other fourteen resolve against shapes fetched at
+runtime and have never been eyeballed. Nothing serves these tables yet, so a bad
+resolution writes rows nobody reads rather than breaking anything; run the
+per-stop consistency check in *Verifying* across every route after the first
+full day.
+
+`RawRetention` is **60 days**. It was widened as a stopgap before the rollup
+existed; now that one does, it can go back to 7 days once a deployed rollup has
+had a chance to run over the existing backlog. Not before — dropping it first
+would delete the fixes the first backfill is meant to read.
+
+Sizing, and note this moved: day one measured ~9.5 MB/day, but that was at the
+old 20 s recording floor. At 10 s expect roughly double, since a moving bus
+clears the jitter radius within either interval — so ~19 MB/day, meaning
+**~1.1 GB at 60 days** against ~130 MB at 7. Check the home server has the room,
+and re-measure after a day at the new rate rather than trusting this estimate.
 
 **Milestone 4 — server-side full-day timetable.** The `day_timetable` table,
 `PutTimetable`/`GetTimetable`/`DeleteTimetable` and their tests all exist; the
@@ -267,9 +350,10 @@ strongest *user-facing* win left: RTL only returns upcoming departures, so a
 fresh install at 19:00 has no morning and cannot answer "what time is the first
 bus". A server watching all day fixes that for everyone.
 
-It is also a **hard prerequisite for Milestone 5**, not a parallel track:
-`stop_arrival.sched_min` and `delta_min` are schedule-adherence figures and there
-is no schedule to compare against until this lands.
+It is a prerequisite for the *schedule-adherence* half of Milestone 5, not for
+all of it: `stop_arrival.sched_min` and `delta_min` need a timetable and are
+written NULL until this lands. `at_ms`, `segment_obs` and `headway_obs` need no
+timetable and are being recorded now.
 
 **Milestone 5 — historical ETA correction.** Needs weeks of recorded history,
 which is why the recorder shipped first. Planned approach: **median** delta
@@ -289,18 +373,19 @@ Three things the first day's data says about how this can actually be built:
 - **`pollEtas` only fetches routes with SSE subscribers**, so any ETA history
   would be collected only while someone happens to be watching.
 - **The dwell at a stop is what `record` throws away.** Fixes are only written
-  when `MovedAt` changes, so a bus waiting at a stop — the arrival signal — is
-  suppressed by design. Arrival times are still inferable from the *gap* between
-  the last fix before the dwell and the first after it, but that gap does not
-  distinguish a dwell from a poller outage or an unwatched stretch.
+  when `MovedAt` changes, so a bus waiting at a stop is suppressed by design.
+  This turned out not to matter for arrivals — linear referencing times the
+  crossing from the fixes either side rather than looking for a fix at the stop
+  — but it is why the layover gap above cannot be closed.
 
-**Open question — recording resolution.** Upstream publishes each bus every
-~11 s, but recorded gaps cluster at 15–30 s because unwatched routes sit on
-`IdleInterval = 20s`. Demand-led polling is right for *serving clients* and wrong
-for *building a corpus*: it makes archive quality a function of who happened to
-be looking. If the history matters, recording needs its own floor (~10 s)
-decoupled from `hub.RouteSubscribers()`. That is a real change to the adaptive
-polling design — read the load arithmetic in *Architecture* before touching it.
+**Recording resolution — decided, done.** Upstream publishes each bus every
+~11 s, but day one's recorded gaps clustered at 15–30 s because unwatched routes
+sat on `IdleInterval = 20s`. Demand-led polling is right for *serving clients*
+and wrong for *building a corpus*: it made archive quality a function of who
+happened to be looking. `IdleInterval` is now **10 s**, decoupled from
+`hub.RouteSubscribers()` in intent even though the same loop still serves both.
+Cost is ~90 req/min network-wide against ~45, inside the measured 3 req/s
+tolerance. Do not raise it back without deciding the history no longer matters.
 
 **Smaller:** the coordinate bounds in the plausibility gate are national
 (−1…8 N, 72…74.5 E), deliberately far wider than observed operations
@@ -317,7 +402,7 @@ pre-existing, and the server's future arrival-matching must not inherit it.
 ## Verifying
 
 ```bash
-cd server && go test ./...     # 83 tests, includes the golden cross-language check
+cd server && go test ./...     # 106 tests, includes the golden cross-language check
 npm run test                   # 134 tests
 npm run build && npm run preview & npm run e2e   # see the flakiness note above
 ```
@@ -329,6 +414,17 @@ curl -s https://rtli-api.mismaah.com/v1/meta
 curl -sN 'https://rtli-api.mismaah.com/v1/live/stream?routes=133' | head -5
 sqlite3 data/rtld.db "SELECT COUNT(*) FROM bus_fix;"          # on the server
 sqlite3 data/rtld.db "SELECT route_code, fix_count FROM route_activity;"
+
+# The rollup's own consistency check, and the one to run after deploying it:
+# every stop on a route should record roughly the same number of arrivals,
+# because every lap passes every stop exactly once. R1's first day gave 36-38
+# for every stop except the two either side of the terminal (31 and 39), which
+# is the layover effect described in Remaining work. A stop far below the rest
+# on any other route means ResolveStops put it on the wrong pass.
+sqlite3 data/rtld.db "
+  SELECT route_code, MIN(n), ROUND(AVG(n)), MAX(n), COUNT(*) AS stops FROM (
+    SELECT route_code, stop_code, COUNT(*) AS n FROM stop_arrival GROUP BY 1, 2
+  ) GROUP BY route_code ORDER BY route_code;"
 
 # Must read 2 (INCREMENTAL). A 0 means the pragma was silently dropped again.
 sqlite3 data/rtld.db "PRAGMA auto_vacuum;"
