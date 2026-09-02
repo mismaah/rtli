@@ -857,6 +857,23 @@ describe('adopting the backend\'s own inference', () => {
     expect(t.anchorAt).toBe(START);
   });
 
+  it('adopts the snapshot even when a poll got there first', () => {
+    // Selecting a route fires the poll immediately while the stream is still
+    // opening, so a track with no history exists by the time the snapshot lands.
+    let tracks = updateTracks(
+      new Map(),
+      [{ busCode: 'B1', plateNumber: 'A0A0000', latitude: 4.1773, longitude: 73.5093 }],
+      START,
+    );
+    expect(tracks.get('B1')!.trail).toEqual([]);
+
+    tracks = updateTracks(tracks, streamed(), START + 1_000);
+
+    const t = tracks.get('B1')!;
+    expect(t.trail.map((p) => p.lat)).toEqual([4.1755, 4.1764]);
+    expect(t.heading).toBe(0);
+  });
+
   it('goes on inferring locally from where the server left off', () => {
     let tracks = updateTracks(new Map(), streamed(), START);
     tracks = updateTracks(tracks, [

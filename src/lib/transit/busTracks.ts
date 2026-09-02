@@ -129,7 +129,15 @@ export function updateTracks(
     const position: LatLng = { lat: bus.latitude, lng: bus.longitude };
     const prior = previous.get(bus.busCode);
 
-    if (!prior) {
+    // The backend has been watching this bus continuously, including well
+    // before this tab tuned in, so whenever its inference rides along it is
+    // taken as given rather than blended with a local guess. Blending was the
+    // subtle bug: the poll fires the instant a route is selected and the stream
+    // takes a moment to open, so a track with no history existed by the time
+    // the snapshot arrived, and its trail was discarded as "already known".
+    // Local inference is what happens when there is no stream, not a second
+    // opinion on one.
+    if (!prior || bus.inferred) {
       next.set(bus.busCode, adopt(bus, position, now));
       continue;
     }
@@ -184,13 +192,14 @@ export function updateTracks(
 }
 
 /**
- * The starting track for a bus this session has not seen before.
+ * A track built from the backend's own inference, or a blank one when a bus
+ * arrives without it.
  *
- * Where the backend has already inferred a heading and a trail, they are taken
- * over rather than thrown away and re-earned over the next two polls. Its
- * timestamps are rebased onto this clock first: the two machines agree on
- * elapsed time but not on the epoch, and a few minutes of skew either way would
- * otherwise age the whole trail out on arrival or hold it long past its life.
+ * The server's timestamps are rebased onto this clock first: the two machines
+ * agree on elapsed time but not on the epoch, and a few minutes of skew either
+ * way would otherwise age the whole trail out on arrival or hold it long past
+ * its life. The position stays the one this client snapped, so a bus never
+ * jumps between the two snappings' answers.
  */
 function adopt(bus: TrackedBus, position: LatLng, now: number): BusTrack {
   const base: BusTrack = {
