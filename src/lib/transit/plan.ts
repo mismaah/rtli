@@ -430,13 +430,45 @@ function relaxRoute(
     const candidate = earliestTrip(route, i, readyAt, liveAtStop?.get(stopCode));
     if (!candidate) continue;
 
-    const currentDeparture = trip ? departureAt(trip, boardIndex, boardLabel!) : Infinity;
-    if (departureAt(candidate, i, label) < currentDeparture) {
+    if (!trip || !boardLabel) {
+      trip = candidate;
+      boardIndex = i;
+      boardLabel = label;
+      continue;
+    }
+
+    // Both boardings are read at *this* stop. Comparing a candidate here against
+    // the trip's departure from the stop already boarded ranks every upstream
+    // stop above this one — the same bus always leaves upstream earlier — which
+    // walked riders back up the route to catch the very bus they were standing
+    // in front of. A trip that leaves this stop sooner is genuinely earlier.
+    const current = departureFrom(trip, i, boardLabel);
+    if (current == null) continue;
+
+    const departure = departureAt(candidate, i, label);
+    // The same bus either way: take the boarding the rider is standing at
+    // soonest, which is the one that walks them least.
+    const sameDeparture = departure === current && label.arriveAt < boardLabel.arriveAt;
+    if (departure < current || sameDeparture) {
       trip = candidate;
       boardIndex = i;
       boardLabel = label;
     }
   }
+}
+
+/**
+ * When the trip already boarded leaves stop `index`.
+ *
+ * Null when the trip does not call there, so a boarding it cannot be compared
+ * against is left alone rather than displaced on a meaningless comparison.
+ */
+function departureFrom(trip: TripView, index: number, boardLabel: Label): number | null {
+  // A frequency route has no per-stop times; its modelled departure is the wait
+  // at whichever stop the rider is standing at, which `departureAt` already gives.
+  if (trip.times.length === 0) return departureAt(trip, index, boardLabel);
+  const scheduled = trip.times[index];
+  return scheduled == null ? null : scheduled + trip.shift;
 }
 
 interface TripView {

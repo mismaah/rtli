@@ -498,6 +498,36 @@ describe('planning on live arrivals', () => {
       .filter((l) => l.route.code === leg.route.code && l.boardStop.code === leg.boardStop.code);
   }
 
+  it('boards at the stop the rider is standing at, not further up the line', () => {
+    // Centro Mall and CHSE are consecutive on R2 and 716 m apart on foot. One bus
+    // reaching Centro Mall at 10:06 is at CHSE at 10:09 — the same vehicle, the
+    // same arrival — so comparing those two departures across stops made the
+    // upstream boarding always look earlier, and walked a rider standing at CHSE
+    // back up the route to catch the bus they were already beside.
+    const at = (minute: number) => ({
+      minutes: minute - 597,
+      vehicleCode: 'C1180',
+      label: `${minute - 597} min`,
+      expectedAt: minute,
+    });
+    const liveEtas: LiveEtaIndex = new Map([
+      ['132', new Map([['401', at(606)], ['11201', at(609)]])],
+    ]);
+
+    const results = planJourney(graph, stopPlace('11201'), stopPlace('1009'), {
+      departAt: 597,
+      liveEtas,
+    });
+    const onR2 = results
+      .flatMap((it) => it.legs)
+      .filter((l): l is BusLeg => l.kind === 'bus')
+      .filter((l) => l.route.code === '132');
+
+    expect(onR2.length).toBeGreaterThan(0);
+    for (const leg of onR2) expect(leg.boardStop.code).toBe('11201');
+    expect(results[0].totalWalkM).toBeLessThan(500);
+  });
+
   it('boards when the bus is reported, not when the timetable says', () => {
     const late = booked.departAt + 9;
     const plans = planJourney(graph, from, to, {
