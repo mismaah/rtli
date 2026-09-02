@@ -1,5 +1,5 @@
 import { walkMeters, walkSeconds } from '@/lib/geo';
-import { estimateRideMinutes, rideMeters } from './buildGraph';
+import { estimateRideMinutes, rideMeters, stopAtPosition } from './buildGraph';
 import type {
   BusLeg,
   Itinerary,
@@ -44,6 +44,34 @@ const DEFAULTS = {
 
 /** Buffer so a transfer isn't planned with zero seconds to spare. */
 const MIN_TRANSFER_MIN = 2;
+
+/**
+ * How far past its last stop a route will still carry a rider.
+ *
+ * Every route's `roadshape` is a closed loop, so a bus reaching the last stop
+ * on its list still has to drive back to the first one to begin its next trip —
+ * 190 m on R2, nearly 800 m on R5/R6/R9 — and it calls at that stop when it
+ * gets there. One position is the whole of that closing stretch; beyond it the
+ * bus is running its next trip, which the timetable publishes separately and
+ * which this must not pretend to plan.
+ *
+ * Exported for tests: it is the bound on how far a ride may run past the end of
+ * a route's stop list, so it is worth asserting against directly.
+ */
+export const MAX_WRAP_STOPS = 1;
+
+/** Time to close the loop's last stretch is unpublished, so allow for a pause. */
+const TERMINAL_DWELL_MIN = 1;
+
+/**
+ * Below this the closing stretch covers no ground and is not a ride.
+ *
+ * On R1, R3, R4, R10 and R15 the list ends at the `OPP` twin of the stop it
+ * began at — Maafannu Bus Terminal OPP back to Maafannu Bus Terminal — sharing
+ * one set of coordinates. Riding that is a leg that goes nowhere; the rider is
+ * already there, and the walk transfers say so.
+ */
+const MIN_WRAP_RIDE_M = 30;
 
 /**
  * Ranking weights, all in minutes so they add up into one comparable number.
@@ -331,11 +359,17 @@ function routesTouching(graph: TransitGraph, marked: Set<StopCode>): Set<string>
 }
 
 /**
- * Scan a route once, forward along its stop order.
+ * Scan a route once, forward around its loop.
  *
  * Each RTL route is a loop whose stop list runs the outbound leg then the `OPP`
- * return leg, so a ride is valid exactly when the boarding index precedes the
- * alighting index. Wrap-around at the terminal is not modelled.
+ * return leg, so a ride is valid exactly when the boarding position precedes the
+ * alighting one. The list ends before the loop closes, though — a bus reaching
+ * the last stop still drives back to the first to start its next trip, and
+ * carries riders over that stretch — so the scan runs `MAX_WRAP_STOPS` positions
+ * past the end, indexing by position around the loop rather than into the array.
+ *
+ * The wrap can never reach the boarding stop again: it is capped at `boardIndex`
+ * as well, so no rider is sold a second lap of the route they are already on.
  */
 function relaxRoute(
   graph: TransitGraph,
@@ -352,8 +386,10 @@ function relaxRoute(
   let boardLabel: Label | null = null;
   let trip: TripView | null = null;
 
-  for (let i = 0; i < route.stops.length; i++) {
-    const stopCode = route.stops[i].stopCode;
+  // `boardIndex` is settled by the time the scan passes the last stop, since
+  // boarding only happens below that, so the wrap's extent is known when needed.
+  for (let i = 0; i < route.stops.length + Math.min(MAX_WRAP_STOPS, Math.max(0, boardIndex)); i++) {
+    const stopCode = stopAtPosition(route, i).stopCode;
 
     // Ride: having boarded upstream, can we alight here?
     if (trip && boardIndex >= 0 && boardLabel) {
@@ -382,7 +418,11 @@ function relaxRoute(
       }
     }
 
-    // Board: only from stops improved in a previous round.
+    // Board: only from stops improved in a previous round, and only on the
+    // route's own stop order — a wrapped position is the ride finishing, not a
+    // fresh boarding opportunity on a trip that has already run its course.
+    if (i >= route.stops.length) continue;
+
     const label = boardable.get(stopCode);
     if (!label || !marked.has(stopCode)) continue;
 
@@ -517,6 +557,25 @@ function arrivalAt(
   boardLabel: Label,
 ): number | null {
   if (alightIndex <= boardIndex) return null;
+
+  const terminal = route.stops.length - 1;
+  if (alightIndex > terminal) {
+    if (rideMeters(route, graph.stops, terminal, alightIndex) < MIN_WRAP_RIDE_M) return null;
+    // Closing the loop. No published time covers the stretch past the last stop,
+    // so the time the bus is there is extended by the drive back round to the
+    // route's start — the one part of the ride this has to estimate.
+    const atTerminal =
+      boardIndex < terminal
+        ? arrivalAt(graph, route, trip, boardIndex, terminal, boardLabel)
+        : departureAt(trip, boardIndex, boardLabel);
+    if (atTerminal == null) return null;
+    return (
+      atTerminal +
+      TERMINAL_DWELL_MIN +
+      estimateRideMinutes(route, graph.stops, terminal, alightIndex)
+    );
+  }
+
   if (trip.estimated) {
     return (
       departureAt(trip, boardIndex, boardLabel) +
@@ -573,7 +632,12 @@ function reconstruct(graph: TransitGraph, end: Label, origin: Place): Leg[] | nu
       if (!route || !boardStop) return null;
 
       const boardIndex = route.stops.findIndex((s) => s.stopCode === boardStop.code);
-      const alightIndex = route.stops.findIndex((s) => s.stopCode === stop.code);
+      let alightIndex = route.stops.findIndex((s) => s.stopCode === stop.code);
+      // A ride that closed the loop alights at a stop sitting earlier in the list
+      // than the one it boarded at. Unwrapping it back to a position around the
+      // loop is what makes the distance and stop count measure the way the bus
+      // actually drove, rather than counting backwards through the list.
+      if (alightIndex <= boardIndex) alightIndex += route.stops.length;
 
       legs.push({
         kind: 'bus',

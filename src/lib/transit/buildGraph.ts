@@ -198,7 +198,20 @@ export function estimateRideMinutes(
 }
 
 /**
- * Distance ridden along a route between two stop indices, in metres.
+ * The stop at a position around the route loop.
+ *
+ * Every Greater Malé `roadshape` comes back as a closed line — start and end
+ * within a metre of each other — so a position past the last stop is the bus
+ * closing the loop back towards where the route starts, not an index error.
+ * Indices in the planner are therefore positions around that loop rather than
+ * offsets into the array, and this is where they are brought back to a stop.
+ */
+export function stopAtPosition(route: Route, position: number): RouteStop {
+  return route.stops[position % route.stops.length];
+}
+
+/**
+ * Distance ridden along a route between two positions around the loop, in metres.
  *
  * Straight lines between consecutive stops inflated by ROAD_DETOUR_FACTOR — the
  * `roadshape` geometry is fetched per route on demand and is not part of the
@@ -212,8 +225,8 @@ export function rideMeters(
 ): number {
   let meters = 0;
   for (let i = fromIndex; i < toIndex; i++) {
-    const a = stops.get(route.stops[i].stopCode);
-    const b = stops.get(route.stops[i + 1].stopCode);
+    const a = stops.get(stopAtPosition(route, i).stopCode);
+    const b = stops.get(stopAtPosition(route, i + 1).stopCode);
     if (a && b) meters += haversineMeters(a, b) * ROAD_DETOUR_FACTOR;
   }
   return meters;

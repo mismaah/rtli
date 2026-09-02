@@ -5,6 +5,7 @@ import { buildGraph, MAX_TRANSFER_WALK_M } from '@/lib/transit/buildGraph';
 import {
   generalizedCost,
   itinerarySignature,
+  MAX_WRAP_STOPS,
   planJourney,
   totalDistanceM,
 } from '@/lib/transit/plan';
@@ -178,14 +179,55 @@ describe('planJourney', () => {
     for (const it of results) expect(it.transfers).toBeLessThanOrEqual(2);
   });
 
-  it('never boards a bus backwards along the route order', () => {
-    const results = planJourney(graph, stopPlace('103'), stopPlace('114'), { departAt: noon });
-    for (const it of results) {
-      for (const leg of it.legs) {
-        if (leg.kind !== 'bus') continue;
-        const board = leg.route.stops.findIndex((s) => s.stopCode === leg.boardStop.code);
-        const alight = leg.route.stops.findIndex((s) => s.stopCode === leg.alightStop.code);
-        expect(alight).toBeGreaterThan(board);
+  it('never rides a bus backwards around the route loop', () => {
+    // Alighting before the boarding stop in the list is legal only as the bus
+    // closes its loop, and then by at most MAX_WRAP_STOPS — anything further is
+    // a ride running the wrong way, or a whole second lap.
+    for (const dest of ['114', '602', '401', '1109', '1009', '201']) {
+      for (const it of planJourney(graph, stopPlace('103'), stopPlace(dest), { departAt: noon })) {
+        for (const leg of it.legs) {
+          if (leg.kind !== 'bus') continue;
+          const n = leg.route.stops.length;
+          const board = leg.route.stops.findIndex((s) => s.stopCode === leg.boardStop.code);
+          const alight = leg.route.stops.findIndex((s) => s.stopCode === leg.alightStop.code);
+          const position = alight > board ? alight : alight + n;
+          expect(position).toBeGreaterThan(board);
+          expect(position).toBeLessThan(n + MAX_WRAP_STOPS + 1);
+        }
+      }
+    }
+  });
+
+  it('rides R2 past its last stop to Carnival, where the loop closes', () => {
+    // R2's stop list ends at Artificial Beach, but its roadshape is a closed
+    // loop that carries on 190 m to Carnival to start the next trip. Riding to
+    // Carnival leaves a 388 m walk to MTCC Tower against 588 m from Artificial
+    // Beach, so before the loop was modelled the planner could only offer the
+    // longer walk.
+    const results = planJourney(graph, stopPlace('11201'), stopPlace('1009'), { departAt: noon });
+    const direct = results.find(
+      (it) => it.legs.filter((l) => l.kind === 'bus').length === 1,
+    )!;
+    expect(direct).toBeDefined();
+
+    const bus = direct.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+    expect(bus.route.routeNumber).toBe('R2');
+    expect(bus.boardStop.code).toBe('11201');
+    expect(bus.alightStop.code).toBe('201');
+    // CHSE is index 5 of 11, so the ride is the six stops round to index 0.
+    expect(bus.numStops).toBe(6);
+    // Measured the way the bus drove, not backwards through the list.
+    expect(bus.meters).toBeGreaterThan(0);
+    expect(bus.arriveAt).toBeGreaterThan(bus.departAt);
+  });
+
+  it('will not carry a rider a whole lap back to the stop they boarded at', () => {
+    for (const dest of ['201', '101', '103', '601']) {
+      for (const it of planJourney(graph, stopPlace('11201'), stopPlace(dest), { departAt: noon })) {
+        for (const leg of it.legs) {
+          if (leg.kind !== 'bus') continue;
+          expect(leg.alightStop.code).not.toBe(leg.boardStop.code);
+        }
       }
     }
   });
