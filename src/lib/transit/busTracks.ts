@@ -60,6 +60,31 @@ export interface TrailPoint extends LatLng {
   at: number;
 }
 
+/**
+ * The same inference, already done by the backend for this bus.
+ *
+ * The server watches every bus continuously, so it knows where one has been
+ * even when this tab has only just started looking at the route. A client that
+ * re-derives everything from its own first poll must instead wait for the bus
+ * to travel before it can draw anything, which is why a trail used to restart
+ * from nothing on every route change.
+ */
+export interface InferredTrack {
+  heading: number | null;
+  speedMps: number | null;
+  movedAt: number;
+  updatedAt: number;
+  firstSeenAt: number;
+  anchor: LatLng;
+  anchorAt: number;
+  trail: TrailPoint[];
+}
+
+/** A live position, optionally carrying the backend's own inference for it. */
+export interface TrackedBus extends LiveBus {
+  inferred?: InferredTrack;
+}
+
 export interface BusTrack extends LatLng {
   busCode: string;
   plateNumber: string;
@@ -93,7 +118,7 @@ export interface BusTrack extends LatLng {
  */
 export function updateTracks(
   previous: ReadonlyMap<string, BusTrack>,
-  buses: readonly LiveBus[],
+  buses: readonly TrackedBus[],
   now: number,
 ): Map<string, BusTrack> {
   const next = new Map<string, BusTrack>();
@@ -105,19 +130,7 @@ export function updateTracks(
     const prior = previous.get(bus.busCode);
 
     if (!prior) {
-      next.set(bus.busCode, {
-        ...position,
-        busCode: bus.busCode,
-        plateNumber: bus.plateNumber,
-        heading: null,
-        speedMps: null,
-        movedAt: now,
-        updatedAt: now,
-        firstSeenAt: now,
-        anchor: position,
-        anchorAt: now,
-        trail: [],
-      });
+      next.set(bus.busCode, adopt(bus, position, now));
       continue;
     }
 
@@ -168,6 +181,50 @@ export function updateTracks(
   }
 
   return next;
+}
+
+/**
+ * The starting track for a bus this session has not seen before.
+ *
+ * Where the backend has already inferred a heading and a trail, they are taken
+ * over rather than thrown away and re-earned over the next two polls. Its
+ * timestamps are rebased onto this clock first: the two machines agree on
+ * elapsed time but not on the epoch, and a few minutes of skew either way would
+ * otherwise age the whole trail out on arrival or hold it long past its life.
+ */
+function adopt(bus: TrackedBus, position: LatLng, now: number): BusTrack {
+  const base: BusTrack = {
+    ...position,
+    busCode: bus.busCode,
+    plateNumber: bus.plateNumber,
+    heading: null,
+    speedMps: null,
+    movedAt: now,
+    updatedAt: now,
+    firstSeenAt: now,
+    anchor: position,
+    anchorAt: now,
+    trail: [],
+  };
+  const inferred = bus.inferred;
+  if (!inferred) return base;
+
+  const skew = now - inferred.updatedAt;
+  return {
+    ...base,
+    heading: inferred.heading,
+    speedMps: inferred.speedMps,
+    movedAt: inferred.movedAt + skew,
+    firstSeenAt: inferred.firstSeenAt + skew,
+    // The anchor is what the heading was measured from, so it has to come
+    // across with it; the position on screen stays the one this client snapped.
+    anchor: inferred.anchor,
+    anchorAt: inferred.anchorAt + skew,
+    trail: prune(
+      inferred.trail.map((p) => ({ ...p, at: p.at + skew })),
+      now,
+    ),
+  };
 }
 
 /** Drops trail points that have aged out, then the oldest beyond the cap. */

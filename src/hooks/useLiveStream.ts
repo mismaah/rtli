@@ -2,6 +2,7 @@ import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { API_BASE } from '@/config';
 import { usePageVisible } from './usePageVisible';
+import type { InferredTrack, TrackedBus } from '@/lib/transit/busTracks';
 import type { LiveBus } from '@/api/rtl';
 
 /**
@@ -24,8 +25,8 @@ import type { LiveBus } from '@/api/rtl';
  * `useLiveBuses` goes on polling exactly as before.
  */
 
-/** Matches the server's snapshot payload. */
-interface StreamTrack extends LiveBus {
+/** Matches the server's snapshot payload: a position plus its own inference. */
+interface StreamTrack extends LiveBus, InferredTrack {
   lat: number;
   lng: number;
 }
@@ -35,13 +36,30 @@ interface SnapshotEvent {
   tracks: StreamTrack[];
 }
 
-/** Server tracks carry lat/lng; the cache wants RTL's latitude/longitude. */
-function toLiveBus(track: StreamTrack): LiveBus {
+/**
+ * Server tracks carry lat/lng; the cache wants RTL's latitude/longitude.
+ *
+ * The heading and trail the server worked out come across too. They are what
+ * makes the first frame of a route already look tracked — the server has been
+ * watching these buses all along, so there is no reason for a client that has
+ * just tuned in to spend two polls re-deriving what is already known.
+ */
+function toTrackedBus(track: StreamTrack): TrackedBus {
   return {
     busCode: track.busCode,
     plateNumber: track.plateNumber,
     latitude: track.lat,
     longitude: track.lng,
+    inferred: {
+      heading: track.heading,
+      speedMps: track.speedMps,
+      movedAt: track.movedAt,
+      updatedAt: track.updatedAt,
+      firstSeenAt: track.firstSeenAt,
+      anchor: track.anchor,
+      anchorAt: track.anchorAt,
+      trail: track.trail ?? [],
+    },
   };
 }
 
@@ -101,8 +119,8 @@ export function useLiveStream(routeCodes: string[]): LiveStreamState {
     const source = new EventSource(`${API_BASE}/v1/live/stream?routes=${encodeURIComponent(key)}`);
     const routes = key.split(',');
 
-    const writeBuses = (routeCode: string, update: (buses: LiveBus[]) => LiveBus[]) => {
-      queryClient.setQueryData<LiveBus[]>(['rtl', 'livecoordinates', routeCode], (previous) =>
+    const writeBuses = (routeCode: string, update: (buses: TrackedBus[]) => TrackedBus[]) => {
+      queryClient.setQueryData<TrackedBus[]>(['rtl', 'livecoordinates', routeCode], (previous) =>
         update(previous ?? []),
       );
     };
@@ -116,7 +134,7 @@ export function useLiveStream(routeCodes: string[]): LiveStreamState {
     source.addEventListener('snapshot', (event) => {
       try {
         const data = JSON.parse((event as MessageEvent<string>).data) as SnapshotEvent;
-        writeBuses(data.routeCode, () => data.tracks.map(toLiveBus));
+        writeBuses(data.routeCode, () => data.tracks.map(toTrackedBus));
       } catch {
         // A malformed frame is not worth tearing the stream down for.
       }
@@ -125,7 +143,7 @@ export function useLiveStream(routeCodes: string[]): LiveStreamState {
     source.addEventListener('bus', (event) => {
       try {
         const track = JSON.parse((event as MessageEvent<string>).data) as StreamTrack;
-        const bus = toLiveBus(track);
+        const bus = toTrackedBus(track);
         // Which route this bus belongs to is not on the delta, so every
         // subscribed route is updated where it already knows the bus. Route
         // membership is stable, so this cannot move a bus between routes.

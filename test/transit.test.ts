@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import fixture from './fixtures/routedetails.json';
 import roadShapeR1 from './fixtures/roadshape-r1.json';
 import { buildGraph, MAX_TRANSFER_WALK_M } from '@/lib/transit/buildGraph';
@@ -27,7 +27,9 @@ import {
   HEADING_EXPIRY_MS,
   TRAIL_MAX_AGE_MS,
   TRAIL_MAX_POINTS,
+  type TrackedBus,
 } from '@/lib/transit/busTracks';
+import { commitTracks, readTracks, resetTracks } from '@/lib/transit/trackStore';
 import {
   FULL_SNAP_M,
   NO_SNAP_M,
@@ -808,6 +810,100 @@ describe('bus trails', () => {
     tracks = updateTracks(tracks, bus(4.3), later);
     tracks = updateTracks(tracks, bus(4.3009), later + 10_000);
     expect(tracks.get('B1')!.trail).toHaveLength(1);
+  });
+});
+
+describe('adopting the backend\'s own inference', () => {
+  const START = 1_000_000;
+  /** What the stream delivers: a position the server has already been tracking. */
+  const streamed = (skewMs = 0): TrackedBus[] => [
+    {
+      busCode: 'B1',
+      plateNumber: 'A0A0000',
+      latitude: 4.1773,
+      longitude: 73.5093,
+      inferred: {
+        heading: 0,
+        speedMps: 10,
+        movedAt: START + skewMs,
+        updatedAt: START + skewMs,
+        firstSeenAt: START - 300_000 + skewMs,
+        anchor: { lat: 4.1764, lng: 73.5093 },
+        anchorAt: START + skewMs,
+        trail: [
+          { lat: 4.1755, lng: 73.5093, at: START - 20_000 + skewMs },
+          { lat: 4.1764, lng: 73.5093, at: START - 10_000 + skewMs },
+        ],
+      },
+    },
+  ];
+
+  it('draws a heading and a trail on the very first frame', () => {
+    const t = updateTracks(new Map(), streamed(), START).get('B1')!;
+
+    expect(t.heading).toBe(0);
+    expect(t.speedMps).toBe(10);
+    expect(t.trail.map((p) => p.lat)).toEqual([4.1755, 4.1764]);
+    // The position on screen is still the one this client snapped.
+    expect(t.lat).toBe(4.1773);
+  });
+
+  it('rebases the server\'s clock onto this one, so skew cannot age a trail out', () => {
+    const skew = 3 * 60_000;
+    const t = updateTracks(new Map(), streamed(-skew), START).get('B1')!;
+
+    expect(t.trail).toHaveLength(2);
+    expect(t.trail[1].at).toBe(START - 10_000);
+    expect(t.anchorAt).toBe(START);
+  });
+
+  it('goes on inferring locally from where the server left off', () => {
+    let tracks = updateTracks(new Map(), streamed(), START);
+    tracks = updateTracks(tracks, [
+      { busCode: 'B1', plateNumber: 'A0A0000', latitude: 4.1782, longitude: 73.5093 },
+    ], START + 10_000);
+
+    const t = tracks.get('B1')!;
+    expect(t.heading).toBeCloseTo(0, 0);
+    expect(t.trail.map((p) => p.lat)).toEqual([4.1755, 4.1764, 4.1764]);
+  });
+});
+
+describe('the shared track store', () => {
+  const START = 1_000_000;
+  const bus = (lat: number): TrackedBus[] => [
+    { busCode: 'B1', plateNumber: 'A0A0000', latitude: lat, longitude: 73.5093 },
+  ];
+
+  beforeEach(() => resetTracks());
+
+  it('keeps a route\'s trail across leaving it and coming back', () => {
+    commitTracks('R1', bus(4.1755), START);
+    commitTracks('R1', bus(4.1764), START + 10_000);
+    expect(readTracks('R1', START + 10_000)[0].trail).toHaveLength(1);
+
+    // <BusMarkers> unmounts and remounts; the history is not the component's.
+    expect(readTracks('R1', START + 11_000)[0].trail).toHaveLength(1);
+  });
+
+  it('keeps routes apart', () => {
+    commitTracks('R1', bus(4.1755), START);
+    expect(readTracks('R2', START)).toEqual([]);
+  });
+
+  it('folds a poll once however many hooks commit it', () => {
+    commitTracks('R1', bus(4.1755), START);
+    commitTracks('R1', bus(4.1764), START + 10_000);
+    // The boarded-bus hook commits the same poll the markers just did.
+    commitTracks('R1', bus(4.1764), START + 10_000);
+
+    expect(readTracks('R1', START + 10_000)[0].trail).toHaveLength(1);
+  });
+
+  it('drops history too old to be drawn as current', () => {
+    commitTracks('R1', bus(4.1755), START);
+    expect(readTracks('R1', START + TRAIL_MAX_AGE_MS)).toHaveLength(1);
+    expect(readTracks('R1', START + TRAIL_MAX_AGE_MS + 1)).toEqual([]);
   });
 });
 

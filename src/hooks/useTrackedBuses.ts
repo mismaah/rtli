@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { updateTracks, type BusTrack } from '@/lib/transit/busTracks';
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react';
+import type { BusTrack } from '@/lib/transit/busTracks';
+import { commitTracks, readTracks, subscribeTracks } from '@/lib/transit/trackStore';
 import { polylinesOf, snapToRoute } from '@/lib/transit/snapToRoute';
 import { useRoadShape } from './useRoadShape';
 import { useLiveBuses } from './useLiveBuses';
@@ -18,17 +19,19 @@ export interface TrackedBuses {
  * the road is also a steadier one, so the heading taken from it stops swinging
  * with the fix. See `snapToRoute` for how far a bus is allowed to be moved.
  *
- * The tracks live in a ref rather than in query state because they are history:
- * each poll is folded into what came before, and react-query only ever hands back
- * the latest snapshot.
+ * The tracks live in `trackStore` rather than in query state because they are
+ * history: each poll is folded into what came before, and react-query only ever
+ * hands back the latest snapshot. Keeping that history outside the component is
+ * also what lets a trail survive leaving a route and coming back to it.
  */
 export function useTrackedBuses(routeCode: string | null): TrackedBuses {
   const { data, dataUpdatedAt } = useLiveBuses(routeCode);
   // The same query the route's shape layer draws from, so this costs no fetch.
   const { data: shape } = useRoadShape(routeCode);
-  const history = useRef(new Map<string, BusTrack>());
-  const trackedRoute = useRef(routeCode);
-  const [tracks, setTracks] = useState<BusTrack[]>([]);
+  const tracks = useSyncExternalStore(
+    useCallback((listener) => subscribeTracks(routeCode, listener), [routeCode]),
+    useCallback(() => readTracks(routeCode), [routeCode]),
+  );
 
   const lines = useMemo(() => polylinesOf(shape), [shape]);
 
@@ -42,16 +45,8 @@ export function useTrackedBuses(routeCode: string | null): TrackedBuses {
   }, [data, lines]);
 
   useEffect(() => {
-    if (trackedRoute.current !== routeCode) {
-      // Another route's buses are not this route's history.
-      trackedRoute.current = routeCode;
-      history.current = new Map();
-      setTracks([]);
-    }
-    if (!corrected) return;
-
-    history.current = updateTracks(history.current, corrected, dataUpdatedAt || Date.now());
-    setTracks([...history.current.values()]);
+    if (!routeCode || !corrected) return;
+    commitTracks(routeCode, corrected, dataUpdatedAt || Date.now());
   }, [routeCode, corrected, dataUpdatedAt]);
 
   return { tracks, updatedAt: dataUpdatedAt };
