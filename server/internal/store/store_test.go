@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -267,5 +268,101 @@ func TestDeleteMissingTimetableIsNotAnError(t *testing.T) {
 	db := openTest(t)
 	if err := db.DeleteTimetable(t.Context(), "1999-01-01"); err != nil {
 		t.Errorf("DeleteTimetable on a missing day = %v, want nil", err)
+	}
+}
+
+// auto_vacuum can only be set on an empty database, and SQLite accepts and
+// ignores the pragma otherwise. The first deployed database was created with
+// journal_mode ahead of it, which allocated page 1 first and left auto_vacuum at
+// NONE — making the incremental_vacuum in Prune a silent no-op.
+func TestOpenSetsIncrementalAutoVacuum(t *testing.T) {
+	db := openTest(t)
+
+	var mode int
+	if err := db.sql.QueryRowContext(t.Context(), `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		t.Fatalf("PRAGMA auto_vacuum: %v", err)
+	}
+	if mode != 2 {
+		t.Errorf("auto_vacuum = %d, want 2 (INCREMENTAL)", mode)
+	}
+}
+
+// A database already in the field carries auto_vacuum = NONE, which no pragma
+// can change on its own. Opening it must repair it, and must not lose its rows.
+func TestOpenRepairsALegacyDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+
+	// Reproduce the original ordering: journal_mode first, so the auto_vacuum
+	// that follows is accepted and ignored.
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := legacy.ExecContext(t.Context(), `
+		PRAGMA journal_mode = WAL;
+		PRAGMA auto_vacuum = INCREMENTAL;
+		CREATE TABLE bus_fix (
+			id INTEGER PRIMARY KEY, route_code TEXT NOT NULL, bus_code TEXT NOT NULL,
+			at_ms INTEGER NOT NULL, lat REAL NOT NULL, lng REAL NOT NULL,
+			snap_lat REAL, snap_lng REAL, offset_m REAL, heading REAL, speed_mps REAL);
+		INSERT INTO bus_fix (route_code, bus_code, at_ms, lat, lng)
+			VALUES ('133', 'C1', 1, 4.17, 73.50);`); err != nil {
+		t.Fatalf("build legacy db: %v", err)
+	}
+	var before int
+	if err := legacy.QueryRowContext(t.Context(), `PRAGMA auto_vacuum`).Scan(&before); err != nil {
+		t.Fatalf("PRAGMA auto_vacuum: %v", err)
+	}
+	if before != 0 {
+		t.Fatalf("legacy fixture is not reproducing the bug: auto_vacuum = %d, want 0", before)
+	}
+	legacy.Close()
+
+	db, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	var after int
+	if err := db.sql.QueryRowContext(t.Context(), `PRAGMA auto_vacuum`).Scan(&after); err != nil {
+		t.Fatalf("PRAGMA auto_vacuum: %v", err)
+	}
+	if after != 2 {
+		t.Errorf("auto_vacuum after repair = %d, want 2 (INCREMENTAL)", after)
+	}
+
+	stats, err := db.Stats(t.Context())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Fixes != 1 {
+		t.Errorf("fixes after repair = %d, want the 1 that was there", stats.Fixes)
+	}
+}
+
+// The snap is only reviewable against the reading it corrected, so the two must
+// land in different columns.
+func TestInsertKeepsRawAndSnappedApart(t *testing.T) {
+	db := openTest(t)
+
+	if err := db.InsertFixes(t.Context(), []Fix{{
+		RouteCode: "133", BusCode: "C1", AtMs: 1,
+		Lat: 4.1700, Lng: 73.5000,
+		SnapLat: ptr(4.1701), SnapLng: ptr(73.5002), OffsetM: ptr(23.4),
+	}}); err != nil {
+		t.Fatalf("InsertFixes: %v", err)
+	}
+
+	var lat, lng, snapLat, snapLng float64
+	if err := db.sql.QueryRowContext(t.Context(),
+		`SELECT lat, lng, snap_lat, snap_lng FROM bus_fix`).Scan(&lat, &lng, &snapLat, &snapLng); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if lat != 4.1700 || lng != 73.5000 {
+		t.Errorf("raw = (%v, %v), want the reported (4.17, 73.5)", lat, lng)
+	}
+	if snapLat != 4.1701 || snapLng != 73.5002 {
+		t.Errorf("snapped = (%v, %v), want (4.1701, 73.5002)", snapLat, snapLng)
 	}
 }

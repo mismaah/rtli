@@ -47,6 +47,49 @@ export const HEADING_EXPIRY_MS = 10 * 60_000;
 export const STOPPED_AFTER_MS = 45_000;
 
 /**
+ * The box outside which a reported position is a feed fault, not a bus.
+ *
+ * RTL's tracker occasionally emits (0, 0). One such reading reached the live
+ * feed on 2026-09-02 and was published unchallenged, putting a bus in the Gulf
+ * of Guinea for a frame — 8,195 km from its route, which is also what it wrote
+ * into the recorder's offset column. Snapping cannot help here: past NO_SNAP_M
+ * the reading is deliberately left alone, and there is no position to correct
+ * anyway, only an absence dressed as one. So it is dropped instead, and the bus
+ * simply holds its last known place until the next real fix.
+ *
+ * Deliberately the whole country rather than the served area — observed
+ * operations sit inside 4.16–4.24 N, 73.48–73.55 E, but a genuine route
+ * extension must never be silently discarded as implausible. This is a guard
+ * against garbage, not a service-area check.
+ */
+export const SERVICE_BOUNDS = {
+  minLat: -1,
+  maxLat: 8,
+  minLng: 72,
+  maxLng: 74.5,
+} as const;
+
+/**
+ * True when a reading is a real coordinate somewhere it could plausibly be.
+ *
+ * An exact zero is rejected on either axis, separately from the bounds. The
+ * bounds alone cannot catch it: the Maldives straddles the equator, so latitude
+ * 0 is genuinely in the country and (0, 73.5) would pass. But a coordinate that
+ * is exactly 0.000000 is not a fix — it is an unset field, the same absence
+ * that produces (0, 0) — and no real GPS reading lands on it.
+ */
+export function isPlausibleFix(lat: number, lng: number): boolean {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (lat === 0 || lng === 0) return false;
+  return (
+    lat >= SERVICE_BOUNDS.minLat &&
+    lat <= SERVICE_BOUNDS.maxLat &&
+    lng >= SERVICE_BOUNDS.minLng &&
+    lng <= SERVICE_BOUNDS.maxLng
+  );
+}
+
+/**
  * How much of a bus's recent path is kept behind it. Twelve confirmed moves is
  * a couple of minutes of city driving — enough for the trail to show which way
  * the bus came without drawing its entire shift across the map.
@@ -124,7 +167,7 @@ export function updateTracks(
   const next = new Map<string, BusTrack>();
 
   for (const bus of buses) {
-    if (!Number.isFinite(bus.latitude) || !Number.isFinite(bus.longitude)) continue;
+    if (!isPlausibleFix(bus.latitude, bus.longitude)) continue;
 
     const position: LatLng = { lat: bus.latitude, lng: bus.longitude };
     const prior = previous.get(bus.busCode);

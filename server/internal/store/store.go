@@ -27,8 +27,15 @@ var schema string
 
 // Retention windows. Raw fixes are bulky and short-lived; what is learned from
 // them is small and worth keeping.
+//
+// RawRetention is 60 days rather than the 7 the tiering intends, because the
+// rollup that would distil fixes into stop_arrival, segment_obs and headway_obs
+// does not exist yet. Until it does, deleting a fix deletes the only copy of
+// what it could have taught, and the ETA-correction work needs weeks of it.
+// Drop this back to 7 days once the rollup is running and has backfilled.
+// At the measured ~9.5 MB/day this is ~570 MB rather than ~66 MB.
 const (
-	RawRetention       = 7 * 24 * time.Hour
+	RawRetention       = 60 * 24 * time.Hour
 	AggregateRetention = 90 * 24 * time.Hour
 )
 
@@ -57,7 +64,42 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		handle.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := ensureAutoVacuum(ctx, handle); err != nil {
+		handle.Close()
+		return nil, fmt.Errorf("auto_vacuum: %w", err)
+	}
 	return &DB{sql: handle}, nil
+}
+
+// ensureAutoVacuum repairs a database created before the pragma ordering in
+// schema.sql was fixed.
+//
+// auto_vacuum can only be set on an empty database, so on an existing file the
+// pragma alone does nothing — the setting only takes hold across a full VACUUM,
+// which rewrites the file. Until it does, Prune's incremental_vacuum is a no-op
+// and freed pages are never handed back.
+//
+// This runs at most once per database: a successful VACUUM leaves auto_vacuum
+// reading 2, so the next startup skips it. Doing it on open is deliberate —
+// VACUUM needs to copy the whole file, and it is far cheaper to pay that now
+// than after the widened raw retention has grown it.
+func ensureAutoVacuum(ctx context.Context, handle *sql.DB) error {
+	var mode int
+	if err := handle.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		return err
+	}
+	if mode != 0 {
+		return nil
+	}
+	if _, err := handle.ExecContext(ctx, `PRAGMA auto_vacuum = INCREMENTAL`); err != nil {
+		return err
+	}
+	// VACUUM cannot run inside a transaction, which is why this is not part of
+	// the schema script.
+	if _, err := handle.ExecContext(ctx, `VACUUM`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (db *DB) Close() error { return db.sql.Close() }

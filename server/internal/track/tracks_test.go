@@ -149,3 +149,66 @@ func TestNonFiniteCoordinatesAreSkipped(t *testing.T) {
 		t.Errorf("a bus with a NaN coordinate was tracked")
 	}
 }
+
+// A coordinate that cannot be a bus in the Maldives is dropped rather than
+// tracked. RTL's feed emitted (0, 0) in production on 2026-09-02; snapped, it
+// reported an 8,195 km offset and put the bus in the Gulf of Guinea for a frame.
+//
+// Mirrors "rejects an implausible reading outright" in test/transit.test.ts.
+func TestUpdateRejectsImplausibleFix(t *testing.T) {
+	tests := []struct {
+		name     string
+		lat, lng float64
+	}{
+		{"null island", 0, 0},
+		{"latitude only", 4.1755, 0},
+		{"longitude only", 0, 73.5093},
+		{"far west", 4.1755, 0.5},
+		{"far north", 60.0, 73.5093},
+		{"NaN", math.NaN(), 73.5093},
+		{"Inf", 4.1755, math.Inf(1)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bad := []rtl.Bus{{BusCode: "B1", PlateNumber: "B1", Latitude: tt.lat, Longitude: tt.lng}}
+			if got := Update(nil, bad, 1_000_000); len(got) != 0 {
+				t.Errorf("tracked %d buses, want none", len(got))
+			}
+		})
+	}
+}
+
+// A bus already being tracked keeps its last real position across a bad reading
+// rather than teleporting to it and re-anchoring there.
+func TestUpdateDropsBadFixWithoutDisturbingTheTrack(t *testing.T) {
+	tracks := Update(nil, bus(4.1755), start)
+	tracks = Update(tracks, bus(4.1764), start+10_000)
+	good := tracks["B1"]
+
+	bad := []rtl.Bus{{BusCode: "B1", PlateNumber: "B1", Latitude: 0, Longitude: 0}}
+	tracks = Update(tracks, bad, start+20_000)
+
+	// The bus is absent for this poll, which is the same thing that happens
+	// when RTL stops reporting it: the caller keeps the prior track.
+	if _, present := tracks["B1"]; present {
+		t.Fatal("a bus with only a bad reading was tracked")
+	}
+	if good.Lat != 4.1764 {
+		t.Errorf("prior track was mutated: lat = %v, want 4.1764", good.Lat)
+	}
+}
+
+// The bounds are a garbage filter, not a service-area check: every position the
+// fleet was actually observed at must pass.
+func TestPlausibleBoundsAdmitObservedOperations(t *testing.T) {
+	// Range of all 37,303 fixes recorded on 2026-09-02.
+	corners := []struct{ lat, lng float64 }{
+		{4.16896261027325, 73.4832148107506},
+		{4.23446885129297, 73.5495485357263},
+	}
+	for _, c := range corners {
+		if !IsPlausibleFix(c.lat, c.lng) {
+			t.Errorf("IsPlausibleFix(%v, %v) = false, want true", c.lat, c.lng)
+		}
+	}
+}

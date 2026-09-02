@@ -22,6 +22,7 @@ import {
 import { haversineMeters, bearingDegrees, compassPoint, type LatLng } from '@/lib/geo';
 import {
   updateTracks,
+  isPlausibleFix,
   isStopped,
   MIN_MOVE_M,
   MAX_GAP_MS,
@@ -825,6 +826,54 @@ describe('bus tracks', () => {
       START,
     );
     expect(tracks.size).toBe(0);
+  });
+
+  // RTL's feed emitted (0, 0) in production on 2026-09-02. Snapped, it reported
+  // an 8,195 km offset and put the bus in the Gulf of Guinea for a frame.
+  //
+  // Mirrors TestUpdateRejectsImplausibleFix in server/internal/track/tracks_test.go.
+  it('rejects an implausible reading outright', () => {
+    const cases: [string, number, number][] = [
+      ['null island', 0, 0],
+      ['latitude only', 4.1755, 0],
+      ['longitude only', 0, 73.5093],
+      ['far west', 4.1755, 0.5],
+      ['far north', 60, 73.5093],
+      ['NaN', NaN, 73.5093],
+      ['Infinity', 4.1755, Infinity],
+    ];
+
+    for (const [name, latitude, longitude] of cases) {
+      const tracks = updateTracks(
+        new Map(),
+        [{ busCode: 'B1', plateNumber: 'A0A0000', latitude, longitude }],
+        START,
+      );
+      expect(tracks.size, name).toBe(0);
+    }
+  });
+
+  it('leaves a tracked bus undisturbed by a bad reading', () => {
+    let tracks = updateTracks(new Map(), bus(4.1755), START);
+    tracks = updateTracks(tracks, bus(4.1764), START + 10_000);
+    const good = tracks.get('B1')!;
+
+    // Absent for this poll, exactly as when RTL stops reporting a bus.
+    tracks = updateTracks(
+      tracks,
+      [{ busCode: 'B1', plateNumber: 'A0A0000', latitude: 0, longitude: 0 }],
+      START + 20_000,
+    );
+    expect(tracks.has('B1')).toBe(false);
+    expect(good.lat).toBe(4.1764);
+  });
+
+  // The bounds are a garbage filter, not a service-area check: every position
+  // the fleet was actually observed at must pass.
+  it('admits the full range of observed operations', () => {
+    // Range of all 37,303 fixes recorded on 2026-09-02.
+    expect(isPlausibleFix(4.16896261027325, 73.4832148107506)).toBe(true);
+    expect(isPlausibleFix(4.23446885129297, 73.5495485357263)).toBe(true);
   });
 
   it('formats live ages in seconds before minutes', () => {

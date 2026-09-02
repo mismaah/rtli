@@ -36,6 +36,19 @@ const (
 	TrailMaxAgeMs = 4 * 60_000
 )
 
+// The box outside which a reported position is a feed fault, not a bus.
+//
+// Mirrors SERVICE_BOUNDS in src/lib/transit/busTracks.ts; see the commentary
+// there for the (0, 0) reading that made this necessary. Deliberately the whole
+// country rather than the served area: a guard against garbage, not a
+// service-area check.
+const (
+	MinLat = -1.0
+	MaxLat = 8.0
+	MinLng = 72.0
+	MaxLng = 74.5
+)
+
 // TrailPoint is somewhere a bus was confirmed to have been.
 type TrailPoint struct {
 	geo.LatLng
@@ -69,7 +82,7 @@ func Update(previous map[string]*Track, buses []rtl.Bus, now int64) map[string]*
 	next := make(map[string]*Track, len(buses))
 
 	for _, bus := range buses {
-		if !isFinite(bus.Latitude) || !isFinite(bus.Longitude) {
+		if !IsPlausibleFix(bus.Latitude, bus.Longitude) {
 			continue
 		}
 		position := geo.LatLng{Lat: bus.Latitude, Lng: bus.Longitude}
@@ -178,6 +191,24 @@ func orPrior(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// IsPlausibleFix reports whether a reading is a real coordinate somewhere it
+// could plausibly be. Mirrors isPlausibleFix in src/lib/transit/busTracks.ts.
+//
+// An exact zero is rejected on either axis, separately from the bounds. The
+// bounds alone cannot catch it: the Maldives straddles the equator, so latitude
+// 0 is genuinely in the country and (0, 73.5) would pass. But a coordinate that
+// is exactly 0.000000 is not a fix — it is an unset field, the same absence that
+// produces (0, 0) — and no real GPS reading lands on it.
+func IsPlausibleFix(lat, lng float64) bool {
+	if !isFinite(lat) || !isFinite(lng) {
+		return false
+	}
+	if lat == 0 || lng == 0 {
+		return false
+	}
+	return lat >= MinLat && lat <= MaxLat && lng >= MinLng && lng <= MaxLng
 }
 
 // isFinite mirrors Number.isFinite: NaN and both infinities are rejected, so a

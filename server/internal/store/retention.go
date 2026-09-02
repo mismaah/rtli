@@ -22,9 +22,11 @@ func (p Pruned) Total() int64 {
 
 // Prune enforces the retention windows.
 //
-// Raw fixes go at 7 days and the aggregates derived from them at 90. The order
-// matters: rollups must already have run, because once a fix is deleted what it
-// could have taught is gone. RunRetention below sequences the two correctly.
+// Raw fixes go at RawRetention and the aggregates derived from them at 90 days.
+// The order matters: rollups must already have run, because once a fix is
+// deleted what it could have taught is gone. RunRetention below sequences the
+// two correctly — but note that no rollup writes those aggregate tables yet,
+// which is why RawRetention is held wide. See the note on it in store.go.
 func (db *DB) Prune(ctx context.Context, now time.Time) (Pruned, error) {
 	rawCutoff := now.Add(-RawRetention).UnixMilli()
 	aggCutoff := now.Add(-AggregateRetention).UnixMilli()

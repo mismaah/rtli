@@ -1,18 +1,25 @@
 -- rtl-improved backend store.
 --
 -- Two tiers, because raw positions are bulky and short-lived while what is
--- learned from them is small and worth keeping. Roughly 242k fixes a day at ~72
--- bytes is ~17 MB/day, so raw data is pruned at 7 days (~122 MB steady state)
--- while the aggregates derived from it survive 90.
+-- learned from them is small and worth keeping. Measured over a full day in
+-- production: ~63k fixes at ~150 bytes, so ~9.5 MB/day. Raw data is pruned at
+-- store.RawRetention while the aggregates derived from it survive 90 days.
 --
 -- Every day/hour column is Malé civil time (UTC+05:00, no DST), matching
 -- serviceDate() in src/lib/time.ts. If these ever disagree the day buckets here
 -- and the client's cache keys silently describe different days.
 
+-- auto_vacuum must come first, and must come before anything writes a page.
+-- SQLite can only change it while the database is still empty, and it fails
+-- *silently* otherwise: setting journal_mode first allocates page 1, after
+-- which this line is accepted and ignored, leaving auto_vacuum at NONE and the
+-- incremental_vacuum in Prune a no-op. That is exactly what happened to the
+-- first deployed database. ensureAutoVacuum in store.go repairs one already in
+-- that state; this ordering stops a fresh one getting there.
+PRAGMA auto_vacuum = INCREMENTAL;
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
-PRAGMA auto_vacuum = INCREMENTAL;
 
 -- One observed bus position. Only rows where the bus actually moved are kept:
 -- a parked bus re-reporting the same coordinates teaches nothing and would be
@@ -25,7 +32,8 @@ CREATE TABLE IF NOT EXISTS bus_fix (
   lat        REAL    NOT NULL,
   lng        REAL    NOT NULL,
   -- Position after correction onto the route geometry, and how far it moved.
-  -- Kept alongside the raw reading so a bad snap can always be reviewed.
+  -- lat/lng above are the reading exactly as RTL gave it, kept alongside so a
+  -- bad snap can always be reviewed against what it was correcting.
   snap_lat   REAL,
   snap_lng   REAL,
   offset_m   REAL,

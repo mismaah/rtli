@@ -32,9 +32,15 @@ func (p *Poller) pollRoute(ctx context.Context, routeCode string) {
 
 	// Snap before inferring: a position pulled back onto the road is a steadier
 	// one to take a bearing from, so the arrow stops swinging with the fix.
+	//
+	// The reading as RTL gave it is kept first, because snapping overwrites the
+	// bus in place and the recorder needs the original: a snap can only be
+	// judged against what it was correcting.
 	buses := live.BusList
+	reported := make(map[string]geo.LatLng, len(buses))
 	offsets := make(map[string]float64, len(buses))
 	for i := range buses {
+		reported[buses[i].BusCode] = geo.LatLng{Lat: buses[i].Latitude, Lng: buses[i].Longitude}
 		if len(lines) == 0 {
 			continue
 		}
@@ -55,7 +61,7 @@ func (p *Poller) pollRoute(ctx context.Context, routeCode string) {
 	p.mu.Unlock()
 
 	p.publishChanges(routeCode, previous, updated)
-	p.record(ctx, routeCode, previous, updated, now)
+	p.record(ctx, routeCode, previous, updated, reported, now)
 }
 
 // publishChanges emits one event per bus that actually moved.
@@ -97,7 +103,8 @@ func samePosition(a, b *track.Track) bool {
 //
 // Only real movement is stored: a parked bus re-reporting the same coordinates
 // every 11 seconds would be most of the table and teaches nothing.
-func (p *Poller) record(ctx context.Context, routeCode string, previous, updated map[string]*track.Track, now time.Time) {
+func (p *Poller) record(ctx context.Context, routeCode string, previous, updated map[string]*track.Track,
+	reported map[string]geo.LatLng, now time.Time) {
 	if p.store == nil {
 		return
 	}
@@ -108,15 +115,23 @@ func (p *Poller) record(ctx context.Context, routeCode string, previous, updated
 		if existed && current.MovedAt == prior.MovedAt {
 			continue // Inside the jitter radius; nothing happened.
 		}
-		offset := current.OffsetM
+		// Copies, not pointers into the live track: the map entry keeps being
+		// mutated by later polls, and a Fix must describe this moment.
+		offset, snapLat, snapLng := current.OffsetM, current.Lat, current.Lng
+		// A bus tracked from a snapshot rather than this poll has no reading of
+		// its own here; the corrected position is the only one there is.
+		raw, ok := reported[busCode]
+		if !ok {
+			raw = geo.LatLng{Lat: current.Lat, Lng: current.Lng}
+		}
 		fixes = append(fixes, store.Fix{
 			RouteCode: routeCode,
 			BusCode:   busCode,
 			AtMs:      current.UpdatedAt,
-			Lat:       current.Lat,
-			Lng:       current.Lng,
-			SnapLat:   &current.Lat,
-			SnapLng:   &current.Lng,
+			Lat:       raw.Lat,
+			Lng:       raw.Lng,
+			SnapLat:   &snapLat,
+			SnapLng:   &snapLng,
 			OffsetM:   &offset,
 			Heading:   current.Heading,
 			SpeedMps:  current.SpeedMps,
