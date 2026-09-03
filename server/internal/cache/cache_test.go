@@ -165,3 +165,82 @@ func TestSuccessfulRefreshResetsStaleness(t *testing.T) {
 		t.Errorf("after a refresh: got %q %v, want the value still inside the bound", v, err)
 	}
 }
+
+// The point of Refresh: an entry that is still perfectly fresh is reloaded
+// anyway. Warming an entry with Get instead would do nothing until it had
+// already expired, leaving the next reader to wait for upstream — which is the
+// wait warming exists to prevent.
+func TestRefreshReplacesAnEntryThatIsStillFresh(t *testing.T) {
+	c := New[int](time.Minute, time.Hour)
+	var loads atomic.Int32
+	load := func(context.Context) (int, error) {
+		return int(loads.Add(1)), nil
+	}
+
+	if _, _, err := c.Get(t.Context(), "k", load); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if err := c.Refresh(t.Context(), "k", load); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	value, hit, err := c.Get(t.Context(), "k", load)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !hit {
+		t.Error("the refreshed value should have been served as a hit")
+	}
+	if value != 2 || loads.Load() != 2 {
+		t.Fatalf("value = %d after %d loads, want 2 after 2", value, loads.Load())
+	}
+}
+
+func TestRefreshJoinsAnInFlightLoadRatherThanDuplicatingIt(t *testing.T) {
+	c := New[int](time.Minute, time.Hour)
+	var loads atomic.Int32
+	release := make(chan struct{})
+	load := func(context.Context) (int, error) {
+		loads.Add(1)
+		<-release
+		return 7, nil
+	}
+
+	go func() {
+		_, _, _ = c.Get(context.Background(), "k", load)
+	}()
+	// Let the reader claim the slot before the warm tick arrives.
+	time.Sleep(50 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() { done <- c.Refresh(context.Background(), "k", load) }()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	if err := <-done; err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := loads.Load(); got != 1 {
+		t.Fatalf("loads = %d, want 1: a refresh must join a load already running", got)
+	}
+}
+
+// A warm that cannot reach upstream must leave the previous entry alone: it is
+// the stale bound's job to decide how long that entry may still be served, not
+// the failed refresh's job to erase it.
+func TestFailedRefreshKeepsThePreviousEntry(t *testing.T) {
+	c := New[int](time.Millisecond, time.Hour)
+	if _, _, err := c.Get(t.Context(), "k", func(context.Context) (int, error) { return 7, nil }); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	wantErr := errors.New("upstream down")
+	if err := c.Refresh(t.Context(), "k", func(context.Context) (int, error) { return 0, wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("Refresh error = %v, want %v", err, wantErr)
+	}
+
+	entry, ok := c.Peek("k")
+	if !ok || entry.Value != 7 {
+		t.Fatalf("Peek = %v, %v; want the previous value 7 still there", entry, ok)
+	}
+}

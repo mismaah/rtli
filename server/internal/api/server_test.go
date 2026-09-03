@@ -116,6 +116,66 @@ func TestConcurrentClientsCollapseToOneUpstreamCall(t *testing.T) {
 	}
 }
 
+// The graph is the one request a page load opens with, and a client that finds
+// it cold gives up on this server and talks to RTL for the rest of its session.
+// So it must be warm before anyone asks, not merely cheap once someone has.
+func TestWarmGraphFillsTheCacheBeforeTheFirstRequest(t *testing.T) {
+	upstream := newFakeUpstream(t)
+	srv := NewServer(Options{RTL: rtl.NewClient(upstream.server.URL)})
+	front := httptest.NewServer(srv.Handler())
+	t.Cleanup(front.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.WarmGraph(ctx)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for upstream.count("/routedetails") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("WarmGraph never fetched the graph")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	res, _ := get(t, front.URL+"/v1/graph", nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	if got := upstream.count("/routedetails"); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1: the request should have been served warm", got)
+	}
+}
+
+// Every tick must actually go upstream. Warming with a plain cache read would
+// find the entry still inside its five-minute TTL and leave it there, so the
+// entry would go on ageing until it expired — putting the wait back on whoever
+// arrived next, which is the whole thing this is here to prevent.
+func TestWarmGraphRefreshesAnEntryThatHasNotExpired(t *testing.T) {
+	upstream := newFakeUpstream(t)
+	srv := NewServer(Options{RTL: rtl.NewClient(upstream.server.URL)})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.warmGraph(ctx, 20*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for upstream.count("/routedetails") < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("upstream fetches = %d, want the ticker to keep refreshing",
+				upstream.count("/routedetails"))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The refresh has to land inside the lifetime of what it is refreshing, or
+// there is a window in which a client still pays for the upstream fetch.
+func TestGraphIsWarmedBeforeItExpires(t *testing.T) {
+	if GraphWarmInterval >= graphTTL {
+		t.Fatalf("GraphWarmInterval %v must be shorter than graphTTL %v", GraphWarmInterval, graphTTL)
+	}
+}
+
 func TestGraphPreservesUpstreamShape(t *testing.T) {
 	front, _ := newTestServer(t)
 	_, body := get(t, front.URL+"/v1/graph", nil)

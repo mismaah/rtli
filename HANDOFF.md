@@ -53,6 +53,11 @@ Still in the working tree:
    README and this file brought in line with it.
 6. **The rollup exists** — `server/internal/rollup/`, wired in `main.go`. The
    three aggregate tables are no longer dead schema.
+7. **The graph is kept warm, and a fallback no longer sticks** — reported from
+   production as "it uses RTL until I refresh the page". `graphTTL` 60 s → 5 min
+   with `Server.WarmGraph` refreshing it every 4½ minutes off the request path;
+   the client gives the graph 12 s rather than 6; and `useTransitGraph` re-asks
+   the backend once, a breaker cooldown later. See the trap below.
 
 Two things to know before `./docker.sh`:
 
@@ -242,6 +247,26 @@ position here to correct. The gate rejects it instead. Note that the *bounds*
 alone do not catch it: the Maldives straddles the equator, so latitude 0 is
 genuinely in-country and `(0, 73.5)` would pass. An exact `0.000000` on either
 axis is rejected on its own terms, as an unset field rather than a fix.
+
+**A fallback the client takes once, it keeps — for the whole session.** The
+graph is the only request a page load makes, and `useTransitGraph` holds the
+answer for 30 minutes with `refetchOnWindowFocus` off globally, so a single slow
+or failed `/v1/graph` hands the entire session to RTL and nothing but a reload
+ever asks again. Reported as "the API is working but it goes to the fallback
+anyway, until I refresh" — and the refresh is what makes it look intermittent
+rather than what fixes it. Note the breaker never even came into it: at one
+request per load, two consecutive failures are two page loads apart.
+
+The trigger was not caught in the act — the endpoint answered 90 for 90 on a
+probe afterwards, p50 0.6 s and p90 1.7 s — and the fix is deliberately
+indifferent to which one it was, because *any* single slow or failed answer
+produces this. The likeliest is a cold `/v1/graph`: at a 60 s TTL and a handful
+of users, most sessions opened on a miss, so a client's own request paid for the
+server's upstream fetch on a 6 s budget while the path it then fell back to had
+15 s for the same 300 KB. Warming removes that spike, the longer budget removes
+the cliff, and the re-ask means neither has to be perfect. **Any new client-side
+fetcher whose answer is held rather than polled needs the same treatment** —
+`staleTime` is also a decision about how long a fallback lasts.
 
 **`npx prettier` rewrites the repo's single quotes to double.** There is no
 committed prettier config, so it uses defaults that disagree with the codebase.

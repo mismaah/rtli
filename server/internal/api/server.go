@@ -29,8 +29,13 @@ import (
 // unreachable, before the request is failed so the client can fall back to RTL
 // or to its own saved snapshot instead.
 const (
-	// RTL republishes routedetails rarely; a minute is well inside useful.
-	graphTTL = 60 * time.Second
+	// RTL republishes routedetails rarely, and what it does change through the
+	// day is that past departures drop off — so a slightly older copy is more
+	// complete than a fresh one, not less. Five minutes is chosen against
+	// GraphWarmInterval below rather than against how fast the data moves: the
+	// entry is refreshed off the request path, and the TTL only has to outlive
+	// the gap between those refreshes.
+	graphTTL = 5 * time.Minute
 	// Routes and stops are effectively static and the timetable covers the whole
 	// day, so hours-old data is still true. Bounded well inside a service day so
 	// it can never present yesterday as today.
@@ -55,6 +60,10 @@ const (
 	// A bus drawn where it was half a minute ago is a bus in the wrong place.
 	liveMaxStale = 30 * time.Second
 )
+
+// GraphWarmInterval is how often WarmGraph refreshes the graph entry. Inside
+// graphTTL, so a client arriving at any moment finds one already there.
+const GraphWarmInterval = graphTTL - 30*time.Second
 
 // Server holds the upstream client and the caches shared by all requests.
 type Server struct {
@@ -213,18 +222,65 @@ const graphKey = "routedetails"
 // the single normalizer, so the server and the client's direct-to-RTL fallback
 // can never disagree about what a route is.
 func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
-	payload, _, err := s.graph.Get(r.Context(), graphKey, func(ctx context.Context) (json.RawMessage, error) {
-		details, err := s.rtl.RouteDetails(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(details)
-	})
+	payload, err := s.graphPayload(r.Context())
 	if err != nil {
 		s.fail(w, r, "graph", err)
 		return
 	}
 	writeRaw(w, r, "public, max-age=60, stale-while-revalidate=600", payload)
+}
+
+// graphPayload returns the cached routedetails, fetching them when the entry
+// has expired.
+func (s *Server) graphPayload(ctx context.Context) (json.RawMessage, error) {
+	payload, _, err := s.graph.Get(ctx, graphKey, s.loadGraph)
+	return payload, err
+}
+
+func (s *Server) loadGraph(ctx context.Context) (json.RawMessage, error) {
+	details, err := s.rtl.RouteDetails(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(details)
+}
+
+// WarmGraph keeps the graph cached ahead of demand until ctx is done.
+//
+// Without it the first visitor after a quiet few minutes pays for the upstream
+// fetch inside their own page load, and that is the least forgiving request in
+// a session: the graph is what the app opens with, the client abandons a slow
+// backend for RTL, and it then holds that decision until the page is reloaded.
+// A ticker moves the cost off the request path entirely for ~320 upstream
+// requests a day, against the ~130k the poller already makes.
+//
+// Failures are logged and retried on the next tick rather than escalated. A
+// warm that cannot reach RTL leaves the previous entry in place, which is
+// exactly what graphMaxStale exists to allow.
+//
+// Refresh rather than Get, deliberately: Get would find the entry still inside
+// its TTL and leave it alone, so a tick would do nothing until the entry had
+// already expired — and waiting for the expiry is the whole thing this exists
+// to prevent.
+func (s *Server) WarmGraph(ctx context.Context) {
+	s.warmGraph(ctx, GraphWarmInterval)
+}
+
+// warmGraph is WarmGraph with the interval injected, so a test does not have to
+// wait out the real one.
+func (s *Server) warmGraph(ctx context.Context, every time.Duration) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		if err := s.graph.Refresh(ctx, graphKey, s.loadGraph); err != nil && ctx.Err() == nil {
+			s.log.Warn("could not warm the graph cache", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // handleShape serves one route's geometry, already simplified.

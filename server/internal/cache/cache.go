@@ -83,17 +83,7 @@ func (c *Cache[T]) Get(ctx context.Context, key string, load func(context.Contex
 		c.mu.Unlock()
 
 		value, err := load(ctx)
-
-		c.mu.Lock()
-		if err == nil {
-			s.entry = &Entry[T]{Value: value, StoredAt: time.Now()}
-		}
-		s.err = err
-		done := s.done
-		s.done = nil
-		stale := s.entry
-		c.mu.Unlock()
-		close(done)
+		stale := c.publish(s, value, err)
 
 		if err != nil {
 			if stale != nil && time.Since(stale.StoredAt) <= c.maxStale {
@@ -104,6 +94,59 @@ func (c *Cache[T]) Get(ctx context.Context, key string, load func(context.Contex
 		}
 		return value, false, nil
 	}
+}
+
+// Refresh loads a new value for key however fresh the current one is, and
+// stores it. A refresh already in flight is waited for rather than duplicated.
+//
+// This is the producer side of an entry that is kept warm rather than filled on
+// a miss. Get only reloads once an entry has expired, which means whoever
+// happens to arrive after that expiry is the one who waits for upstream; for
+// the entry a page load opens with, that wait is the difference between a
+// client using this server and a client giving up on it. Refresh is how the
+// cost is moved off the request path.
+func (c *Cache[T]) Refresh(ctx context.Context, key string, load func(context.Context) (T, error)) error {
+	c.mu.Lock()
+	s, ok := c.entries[key]
+	if !ok {
+		s = &slot[T]{}
+		c.entries[key] = s
+	}
+	if s.done != nil {
+		done := s.done
+		c.mu.Unlock()
+		select {
+		case <-done:
+			// Someone else has just done the work; a second one now would be
+			// the duplicate this cache exists to avoid.
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	s.done = make(chan struct{})
+	c.mu.Unlock()
+
+	value, err := load(ctx)
+	c.publish(s, value, err)
+	return err
+}
+
+// publish stores a successful load, releases the waiters, and returns whatever
+// entry the slot is left holding — which on failure is the previous one, for
+// the caller to weigh against maxStale. The caller must own the refresh.
+func (c *Cache[T]) publish(s *slot[T], value T, err error) *Entry[T] {
+	c.mu.Lock()
+	if err == nil {
+		s.entry = &Entry[T]{Value: value, StoredAt: time.Now()}
+	}
+	s.err = err
+	done := s.done
+	s.done = nil
+	entry := s.entry
+	c.mu.Unlock()
+	close(done)
+	return entry
 }
 
 // Peek returns the current entry without triggering a load.

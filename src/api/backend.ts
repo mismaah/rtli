@@ -18,8 +18,24 @@ export const COOLDOWN_MS = 60_000;
  * Shorter than RTL's own 15 s: the backend is meant to be the fast path, so one
  * that is slow has already failed at its job and the direct call is the better
  * use of the remaining time.
+ *
+ * It is a budget for *waiting*, not for transferring, which is why the graph
+ * overrides it below. Giving a 300 KB payload less time than the fallback that
+ * would replace it means abandoning a working server for a slower path.
  */
 const BACKEND_TIMEOUT_MS = 6_000;
+
+/**
+ * The budget for the one large payload, sized against RTL's own 15 s rather
+ * than against how fast a healthy backend answers.
+ *
+ * Failing over here is not the cheap move it is elsewhere: the graph is fetched
+ * once at startup, held for half an hour, and the fallback fetches the same
+ * routes and timetables uncompressed and directly. A client that gives up on
+ * this at six seconds has not saved itself anything — it has taken the slower
+ * road, on the assumption that the fast one is broken.
+ */
+export const GRAPH_TIMEOUT_MS = 12_000;
 
 /**
  * Trips after repeated failures and heals after a cooldown.
@@ -36,7 +52,12 @@ export class CircuitBreaker {
     private readonly cooldownMs = COOLDOWN_MS,
   ) {}
 
-  /** True when the backend should be skipped outright. */
+  /**
+   * True when the backend should be skipped outright.
+   *
+   * Asking spends the one probe the cooldown hands out, so this is for callers
+   * that are about to make the request either way. See `peekOpen`.
+   */
   isOpen(now: number): boolean {
     if (this.failures < this.threshold) return false;
     if (now - this.openedAt >= this.cooldownMs) {
@@ -45,6 +66,17 @@ export class CircuitBreaker {
       return false;
     }
     return true;
+  }
+
+  /**
+   * The same answer, without spending that probe.
+   *
+   * A caller deciding whether an optional request is worth making needs to read
+   * the state rather than change it — otherwise merely wondering consumes the
+   * attempt the next real request was going to get.
+   */
+  peekOpen(now: number): boolean {
+    return this.failures >= this.threshold && now - this.openedAt < this.cooldownMs;
   }
 
   recordSuccess(): void {
@@ -60,6 +92,13 @@ export class CircuitBreaker {
 
 const breaker = new CircuitBreaker();
 
+export interface BackendOptions {
+  /** Overrides the default wait budget; see GRAPH_TIMEOUT_MS. */
+  timeoutMs?: number;
+  /** Test seam: the clock the breaker is read against. */
+  now?: number;
+}
+
 /**
  * Fetches JSON from the backend, or returns null if it is unconfigured,
  * skipped, or fails for any reason.
@@ -70,13 +109,13 @@ const breaker = new CircuitBreaker();
 export async function fetchFromBackend<T>(
   path: string,
   signal?: AbortSignal,
-  now: number = Date.now(),
+  { timeoutMs = BACKEND_TIMEOUT_MS, now = Date.now() }: BackendOptions = {},
 ): Promise<T | null> {
   if (!API_BASE) return null;
   if (breaker.isOpen(now)) return null;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const onAbort = () => controller.abort();
   signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -102,6 +141,18 @@ export async function fetchFromBackend<T>(
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
   }
+}
+
+/**
+ * Whether the backend is worth a request right now: configured, and not being
+ * skipped after repeated failures.
+ *
+ * For deciding whether to *re-ask* after a fallback — a question worth
+ * answering only when the answer might have changed, and never at the cost of
+ * the breaker's own probe.
+ */
+export function backendWorthAsking(now: number = Date.now()): boolean {
+  return API_BASE !== null && !breaker.peekOpen(now);
 }
 
 /** Test seam: forget any recorded failures. */

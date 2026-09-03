@@ -116,6 +116,10 @@ func main() {
 	}
 
 	server := api.NewServer(options)
+	// Ahead of demand rather than on it: the graph is the request a page load
+	// opens with, and a client that finds it cold falls back to RTL for the
+	// rest of its session.
+	go server.WarmGraph(ctx)
 
 	httpServer := &http.Server{
 		Addr:    *addr,

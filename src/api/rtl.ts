@@ -10,7 +10,7 @@
  * these functions have the same contract whether or not a server is configured
  * or reachable. Every call site above this file is unchanged by its presence.
  */
-import { fetchFromBackend } from './backend';
+import { fetchFromBackend, GRAPH_TIMEOUT_MS } from './backend';
 
 const BOOKING_BASE = 'https://bo.rtl.mv:4455/maldives/api';
 
@@ -117,6 +117,14 @@ function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise
   });
 }
 
+/** Which path actually answered. See `fetchRouteDetails`. */
+export type Via = 'backend' | 'rtl';
+
+export interface ServedRouteDetails {
+  details: RouteDetailsResponse;
+  via: Via;
+}
+
 /**
  * Routes, stops, coordinates and timetables.
  *
@@ -124,11 +132,22 @@ function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise
  * `buildGraph` stays the single normalizer and the two paths cannot disagree
  * about what a route is. The backend's copy also carries the whole day, where
  * RTL returns only departures still to come.
+ *
+ * Alone among the fetchers this one reports which path answered, because alone
+ * among them it is fetched once and then held: a fallback here is a decision
+ * about the whole session rather than about one poll, and `useTransitGraph`
+ * needs to know one was taken so it can revisit it.
  */
-export async function fetchRouteDetails(signal?: AbortSignal): Promise<RouteDetailsResponse> {
-  const served = await fetchFromBackend<RouteDetailsResponse>('/v1/graph', signal);
-  if (served) return served;
-  return request<RouteDetailsResponse>(`${BOOKING_BASE}/booking/v2/bus/routedetails`, { signal });
+export async function fetchRouteDetails(signal?: AbortSignal): Promise<ServedRouteDetails> {
+  const served = await fetchFromBackend<RouteDetailsResponse>('/v1/graph', signal, {
+    timeoutMs: GRAPH_TIMEOUT_MS,
+  });
+  if (served) return { details: served, via: 'backend' };
+  const details = await request<RouteDetailsResponse>(
+    `${BOOKING_BASE}/booking/v2/bus/routedetails`,
+    { signal },
+  );
+  return { details, via: 'rtl' };
 }
 
 /** Route geometry. The backend's copy arrives already simplified. */

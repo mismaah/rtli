@@ -303,6 +303,13 @@ breaker sets the server aside after two consecutive failures for 60 s — withou
 it, a server that is down would make every request pay a timeout before falling
 back, which is a latency regression exactly when things are already wrong.
 
+Falling back is cheap for a bus position, which is asked for again seconds later,
+and expensive for the timetable, which is fetched once and then held for half an
+hour. So the graph gets its own, longer budget (12 s against 6) — giving up on it
+early does not save a slow client anything, it just sends the same 300 KB the
+longer way round — and `useTransitGraph` re-asks the server once, a cooldown
+later, rather than letting one slow answer decide the whole session.
+
 #### Storage
 
 SQLite, no user data of any kind — no accounts, no cookies, nothing keyed to a
@@ -398,16 +405,24 @@ yesterday as today.
 
 | | TTL | Stale bound |
 |---|---|---|
-| Timetable | 60 s | 6 h — routes are static and the timetable covers the day |
+| Timetable | 5 min | 6 h — routes are static and the timetable covers the day |
 | Geometry | 24 h | 7 d — stale geometry is simply correct geometry |
 | ETAs | 10 s | 60 s — a countdown is only true near when it was read |
 | Positions | 2 s | 30 s — a bus drawn where it was is a bus in the wrong place |
 
+The timetable is also refreshed **ahead of demand**, every 4½ minutes, so no
+client's request is the one that waits on RTL. It is the first request a page
+load makes and the least forgiving one — a client that finds it cold gives up on
+this server and talks to RTL for the rest of its session — so it is the one
+entry worth keeping warm rather than filling on a miss.
+
 #### Overnight
 
 Buses report roughly 04:00–01:00, so the poller sleeps from **01:00 to 03:59**
-Malé time: no position requests, no ETA requests, nothing sent to RTL for three
-hours. Retention still runs hourly, which is a good time for it, and the cached
+Malé time: no position requests and no ETA requests for three hours — only the
+timetable refresh keeps ticking, at one request every 4½ minutes, because a
+timetable is exactly what someone planning tomorrow's trip at 2am is asking for.
+Retention still runs hourly, which is a good time for it, and the cached
 endpoints still answer.
 
 Two things follow from that gap, and both are handled rather than tolerated.
@@ -417,7 +432,7 @@ the night would sit in memory until morning and a client connecting at 02:00
 would receive it as its opening snapshot — a live-looking picture of where buses
 were three hours ago. Tracks older than five minutes are withheld and swept from
 memory, so the honest answer at 3am is an empty snapshot. Five minutes is
-comfortably longer than the 20-second idle poll, so an unwatched route's
+comfortably longer than the 10-second idle poll, so an unwatched route's
 perfectly good position is never thrown away for being one cycle old.
 
 **Headings expire too.** A bus reappearing at 04:00 trips the 90-second gap guard,
