@@ -34,12 +34,25 @@ networks block — the app reports that plainly rather than hanging.
 | `booking/v1/bus/livecoordinates` | Where each bus is right now |
 | `gps-engine/eta/all-stops-of-route` | Real-time arrivals per stop |
 
-Three things about this data shape the whole app:
+A few things about this data shape the whole app:
 
 **Timetables are hidden inside the response.** Each stop carries a `timings`
 array, and `timings[].order` is a *trip number* shared across every stop on the
 route. Grouping by it reconstructs a proper GTFS-style timetable — R1 trip 29 runs
 stop 1 at 12:45 through stop 18 at 13:55.
+
+**...but the trip numbers do not always line up.** On six of the fifteen routes a
+stop is numbered a trip out of step with its neighbours, and grouping naively
+joins the bus leaving Hulhumalé to the one that reached Malé two minutes later —
+R8 crossing the 6.5 km bridge at 194 km/h. `buildGraph` walks each route looking
+for legs no bus could have driven and, where the next trip either side turns one
+into a believable drive, puts the numbering back in step. What that cannot
+explain is time RTL never published: R7's return over the bridge is given two
+minutes and the missing twenty are nowhere in the feed. Those legs are stretched
+to what the distance allows and the ride is labelled *Estimated*. Published times
+are never rewritten — which stop drifted is unknowable, and moving a departure
+would send riders after a bus that has already gone — so `Trip.times` stays
+exactly as RTL printed it and `Trip.elapsed` carries the durations to plan on.
 
 **Routes are loops with explicit return stops.** A route's stop list runs the
 outbound leg and then the return leg, with return stops given their own codes

@@ -1,7 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import fixture from './fixtures/routedetails.json';
 import roadShapeR1 from './fixtures/roadshape-r1.json';
-import { buildGraph, MAX_TRANSFER_WALK_M } from '@/lib/transit/buildGraph';
+import {
+  buildGraph,
+  MAX_PLAUSIBLE_BUS_KMH,
+  MAX_TRANSFER_WALK_M,
+  rideMeters,
+} from '@/lib/transit/buildGraph';
 import {
   generalizedCost,
   itinerarySignature,
@@ -123,6 +128,108 @@ describe('buildGraph', () => {
     expect(trip.times[17]).toBe(parseClock('13:55'));
   });
 
+  it('never joins two stops into a ride no bus could have driven', () => {
+    // RTL numbers one stop a trip out of step with its neighbours on six of the
+    // fifteen routes, which read at face value put R8 across the 6.5 km bridge
+    // from MACL Flat to Senahiya in two minutes — 194 km/h.
+    for (const route of graph.routes.values()) {
+      for (const trip of route.trips) {
+        for (let i = 0; i + 1 < route.stops.length; i++) {
+          const from = trip.elapsed[i];
+          const to = trip.elapsed[i + 1];
+          if (from == null || to == null) continue;
+          const meters = rideMeters(route, graph.stops, i, i + 1);
+          // A minute of published rounding, as buildGraph itself allows.
+          const kmh = meters / 1000 / ((to - from + 1) / 60);
+          expect(`${route.routeNumber} leg ${i}: ${kmh.toFixed(0)} km/h`).toBe(
+            `${route.routeNumber} leg ${i}: ${Math.min(kmh, MAX_PLAUSIBLE_BUS_KMH).toFixed(0)} km/h`,
+          );
+        }
+      }
+    }
+  });
+
+  it('realigns R8 across the bridge onto the trip that actually ran it', () => {
+    const r8 = graph.routes.get('128')!;
+    const macl = r8.stops.findIndex((s) => s.stopCode === '11003');
+    const senahiya = r8.stops.findIndex((s) => s.stopCode === '204');
+    expect(senahiya).toBe(macl + 1);
+
+    const trip = r8.trips.find((t) => t.times[macl] === parseClock('18:04'))!;
+    expect(trip).toBeDefined();
+    // 17 minutes, in line with the 15 the same route publishes for the return
+    // crossing — not the 2 that reading `timings[].order` straight produces.
+    expect(trip.elapsed[senahiya]! - trip.elapsed[macl]!).toBe(17);
+    expect(trip.repairsBefore[senahiya]).toBe(trip.repairsBefore[macl]);
+  });
+
+  it('estimates a leg whose time RTL never published, and says it did', () => {
+    // R3 gives STELCO to the airport terminal two minutes for 3.1 km, and no
+    // shift recovers the missing quarter hour: it is not in the feed at all.
+    const r3 = graph.routes.get('123')!;
+    const stelco = r3.stops.findIndex((s) => s.stopCode === '105');
+    const via = r3.stops.findIndex((s) => s.stopCode === '306');
+    const trip = r3.trips.find((t) => t.times[stelco] != null && t.times[via] != null)!;
+
+    expect(trip.times[via]! - trip.times[stelco]!).toBe(2);
+    expect(trip.elapsed[via]! - trip.elapsed[stelco]!).toBe(11);
+    expect(trip.repairsBefore[via]).toBeGreaterThan(trip.repairsBefore[stelco]);
+  });
+
+  it('leaves a genuine layover alone — only impossible legs are touched', () => {
+    // 15 minutes to cover the 181 m from the airport terminal to the MACL office
+    // is a bus waiting, not a misjoin, and shortening it would strand riders.
+    const r3 = graph.routes.get('123')!;
+    const via = r3.stops.findIndex((s) => s.stopCode === '306');
+    const macl = r3.stops.findIndex((s) => s.stopCode === '11306');
+    const trip = r3.trips.find((t) => t.times[via] != null && t.times[macl] != null)!;
+    expect(trip.elapsed[macl]! - trip.elapsed[via]!).toBe(trip.times[macl]! - trip.times[via]!);
+  });
+
+  it('leaves R1 alone, whose timetable joins up as published', () => {
+    const r1 = graph.routes.get('133')!;
+    for (const trip of r1.trips) {
+      expect(trip.repairsBefore.every((n) => n === 0)).toBe(true);
+      // Both run from the trip's first timed stop, which is not always its first.
+      const anchor = trip.times.findIndex((t) => t != null);
+      for (let i = anchor; i < trip.times.length; i++) {
+        if (trip.times[i] == null) continue;
+        expect(trip.elapsed[i]! - trip.elapsed[anchor]!).toBe(
+          trip.times[i]! - trip.times[anchor]!,
+        );
+      }
+    }
+  });
+
+  it('never rewrites a published time, so stop departure boards stay RTL\'s own', () => {
+    const published = new Map<string, Set<number>>();
+    for (const raw of (fixture as unknown as RouteDetailsResponse).routeResponse ?? []) {
+      for (const stop of raw.busRouteStopList ?? []) {
+        const key = `${raw.code}/${stop.code}`;
+        const times = published.get(key) ?? new Set<number>();
+        for (const t of stop.timings ?? []) {
+          const minutes = parseClock(t.timing);
+          if (minutes != null) times.add(minutes);
+        }
+        published.set(key, times);
+      }
+    }
+
+    for (const route of graph.routes.values()) {
+      route.stops.forEach((rs, index) => {
+        const times = published.get(`${route.code}/${rs.stopCode}`);
+        if (!times || times.size === 0) return;
+        for (const trip of route.trips) {
+          const at = trip.times[index];
+          if (at == null) continue;
+          // Trips running past midnight are rolled past 1440 to keep the
+          // planner's arithmetic monotonic; the clock time is unchanged.
+          expect(times.has(at % (24 * 60))).toBe(true);
+        }
+      });
+    }
+  });
+
   it('keeps route stops ordered outbound then along the OPP return leg', () => {
     const r1 = graph.routes.get('133')!;
     expect(r1.stops.map((s) => s.order)).toEqual([...r1.stops.map((s) => s.order)].sort((a, b) => a - b));
@@ -236,6 +343,36 @@ describe('planJourney', () => {
   it('returns nothing for Malé to Villimalé, which is ferry-only', () => {
     const results = planJourney(graph, stopPlace('103'), stopPlace('1301'), { departAt: noon });
     expect(results).toHaveLength(0);
+  });
+
+  it('takes the bridge in the time it takes, not the two minutes RTL prints', () => {
+    // The trip behind the screenshot: R8 leaving MACL Flat at 18:04. It arrived
+    // at Senahiya 18:06 — an 8-minute door-to-door journey across the bridge.
+    const results = planJourney(graph, stopPlace('11003'), stopPlace('204'), {
+      departAt: parseClock('17:58')!,
+    });
+    const direct = results.find(
+      (it) => it.legs.filter((l) => l.kind === 'bus').length === 1,
+    )!;
+    const bus = direct.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+    expect(bus.route.routeNumber).toBe('R8');
+    expect(bus.departAt).toBe(parseClock('18:04'));
+    expect(bus.arriveAt).toBe(parseClock('18:21'));
+    // Realigned onto real published times, so nothing here was guessed.
+    expect(bus.estimated).toBe(false);
+  });
+
+  it('surfaces a ride over a repaired leg as an estimate', () => {
+    const results = planJourney(graph, stopPlace('105'), stopPlace('306'), {
+      departAt: parseClock('12:00')!,
+    });
+    const bus = results
+      .flatMap((it) => it.legs)
+      .find((l): l is BusLeg => l.kind === 'bus' && l.route.routeNumber === 'R3')!;
+
+    expect(bus.arriveAt - bus.departAt).toBe(11);
+    expect(bus.estimated).toBe(true);
   });
 
   it('flags itineraries that rely on an unscheduled minibus route', () => {

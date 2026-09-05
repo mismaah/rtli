@@ -393,25 +393,25 @@ function relaxRoute(
 
     // Ride: having boarded upstream, can we alight here?
     if (trip && boardIndex >= 0 && boardLabel) {
-      const arriveAt = arrivalAt(graph, route, trip, boardIndex, i, boardLabel);
-      if (arriveAt != null) {
+      const arrival = arrivalAt(graph, route, trip, boardIndex, i, boardLabel);
+      if (arrival != null) {
         const label: Label = {
           stopCode,
-          arriveAt,
+          arriveAt: arrival.at,
           round,
           via: {
             kind: 'bus',
             from: boardLabel,
             routeCode: route.code,
             departAt: departureAt(trip, boardIndex, boardLabel),
-            estimated: trip.estimated,
+            estimated: arrival.estimated,
             live: trip.live,
           },
         };
         busArrivals.push(label);
 
         const existing = best.get(stopCode);
-        if (!existing || arriveAt < existing.arriveAt) {
+        if (!existing || arrival.at < existing.arriveAt) {
           best.set(stopCode, label);
           improved.add(stopCode);
         }
@@ -473,6 +473,9 @@ function departureFrom(trip: TripView, index: number, boardLabel: Label): number
 
 interface TripView {
   times: (number | null)[];
+  /** `Trip.elapsed` and `Trip.repairsBefore`; empty on a frequency route. */
+  elapsed: (number | null)[];
+  repairsBefore: number[];
   /**
    * Minutes added to every timetable time so the trip runs to the bus that was
    * actually reported. Zero for a trip taken straight off the schedule.
@@ -512,9 +515,10 @@ function earliestTrip(
   if (route.trips.length === 0) {
     // Frequency route: no timetable published, so a reported bus is the only
     // real departure there is. Failing that, assume a headway.
+    const none = { times: [], elapsed: [], repairsBefore: [] };
     return catchable
-      ? { times: [], shift: 0, liveDepartAt, live, estimated: true, headwayMin: 0 }
-      : { times: [], shift: 0, estimated: true, headwayMin: route.headwayMin ?? 15 };
+      ? { ...none, shift: 0, liveDepartAt, live, estimated: true, headwayMin: 0 }
+      : { ...none, shift: 0, estimated: true, headwayMin: route.headwayMin ?? 15 };
   }
 
   if (catchable) {
@@ -527,6 +531,8 @@ function earliestTrip(
     if (matched) {
       return {
         times: matched.times,
+        elapsed: matched.elapsed,
+        repairsBefore: matched.repairsBefore,
         shift: liveDepartAt - matched.times[index]!,
         live,
         estimated: false,
@@ -542,7 +548,14 @@ function earliestTrip(
     if (depart == null || depart < readyAt) continue;
     if (depart < bestDeparture) {
       bestDeparture = depart;
-      bestTrip = { times: t.times, shift: 0, estimated: false, headwayMin: 0 };
+      bestTrip = {
+        times: t.times,
+        elapsed: t.elapsed,
+        repairsBefore: t.repairsBefore,
+        shift: 0,
+        estimated: false,
+        headwayMin: 0,
+      };
     }
   }
   return bestTrip;
@@ -580,6 +593,12 @@ function departureAt(trip: TripView, boardIndex: number, boardLabel: Label): num
   return scheduled == null ? boardLabel.arriveAt : scheduled + trip.shift;
 }
 
+/** When a ride ends, and whether getting that number took any guessing. */
+interface Arrival {
+  at: number;
+  estimated: boolean;
+}
+
 function arrivalAt(
   graph: TransitGraph,
   route: Route,
@@ -587,7 +606,7 @@ function arrivalAt(
   boardIndex: number,
   alightIndex: number,
   boardLabel: Label,
-): number | null {
+): Arrival | null {
   if (alightIndex <= boardIndex) return null;
 
   const terminal = route.stops.length - 1;
@@ -599,27 +618,43 @@ function arrivalAt(
     const atTerminal =
       boardIndex < terminal
         ? arrivalAt(graph, route, trip, boardIndex, terminal, boardLabel)
-        : departureAt(trip, boardIndex, boardLabel);
+        : { at: departureAt(trip, boardIndex, boardLabel), estimated: trip.estimated };
     if (atTerminal == null) return null;
-    return (
-      atTerminal +
-      TERMINAL_DWELL_MIN +
-      estimateRideMinutes(route, graph.stops, terminal, alightIndex)
-    );
+    return {
+      at:
+        atTerminal.at +
+        TERMINAL_DWELL_MIN +
+        estimateRideMinutes(route, graph.stops, terminal, alightIndex),
+      estimated: atTerminal.estimated,
+    };
   }
 
   if (trip.estimated) {
-    return (
-      departureAt(trip, boardIndex, boardLabel) +
-      estimateRideMinutes(route, graph.stops, boardIndex, alightIndex)
-    );
+    return {
+      at:
+        departureAt(trip, boardIndex, boardLabel) +
+        estimateRideMinutes(route, graph.stops, boardIndex, alightIndex),
+      estimated: true,
+    };
   }
   const depart = trip.times[boardIndex];
   const arrive = trip.times[alightIndex];
   if (arrive == null || depart == null || arrive < depart) return null;
-  // Shifted with the departure: a bus reported nine minutes late is nine minutes
-  // late all the way down the line, and its connections have to be judged on that.
-  return arrive + trip.shift;
+
+  // Departure plus how long the ride takes, rather than the arrival time itself,
+  // because a few of RTL's legs are timetabled faster than a bus can drive and
+  // `Trip.elapsed` has already stretched those to what the road allows. Where
+  // nothing was stretched the two are the same number. Departure carries the
+  // shift with it: a bus reported nine minutes late is nine minutes late all the
+  // way down the line, and its connections have to be judged on that.
+  const from = trip.elapsed[boardIndex];
+  const to = trip.elapsed[alightIndex];
+  const ride = from != null && to != null ? to - from : arrive - depart;
+
+  return {
+    at: departureAt(trip, boardIndex, boardLabel) + ride,
+    estimated: trip.repairsBefore[alightIndex] > trip.repairsBefore[boardIndex],
+  };
 }
 
 /** Walks the label chain back to the origin and emits legs in travel order. */

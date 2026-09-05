@@ -18,10 +18,25 @@ export interface RouteStop {
 }
 
 export interface Trip {
-  /** RTL's `timings[].order` — the trip number, shared across every stop. */
+  /** Trip number after realignment — RTL's `timings[].order` at the first stop. */
   tripOrder: number;
   /** Minutes since Malé midnight, index-aligned to `Route.stops`. */
   times: (number | null)[];
+  /**
+   * Minutes from the trip's first timed stop, with legs the timetable gives an
+   * impossible time lengthened to what the distance allows.
+   *
+   * `times` stays exactly as published, so a stop's departure board is still
+   * RTL's own; this is the ride duration to plan on. Where nothing was repaired
+   * the two agree — `elapsed[b] - elapsed[a]` equals `times[b] - times[a]`.
+   * Null wherever `times` is.
+   */
+  elapsed: (number | null)[];
+  /**
+   * Legs repaired at or before each position, so a ride that crosses one can be
+   * surfaced as an estimate: it did when the count rises between its two ends.
+   */
+  repairsBefore: number[];
 }
 
 export interface Route {
