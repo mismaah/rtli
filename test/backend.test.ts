@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CircuitBreaker, COOLDOWN_MS } from '@/api/backend';
+import { RECHECK_MS, nextRecheckDelay, type TransitGraphResult } from '@/hooks/useTransitGraph';
 
 /**
  * The breaker exists so that a backend which is down costs nothing rather than
@@ -187,5 +188,139 @@ describe('fetchRouteDetails', () => {
 
     const served = await pending;
     expect(served.via).toBe('backend');
+  });
+});
+
+/**
+ * The 15-second budget on a direct RTL call.
+ *
+ * It was dead for as long as every caller passed a signal — which all of them
+ * do, because React Query supplies one — since handing that signal to `fetch`
+ * left the timeout aborting a controller nothing was listening to. A network
+ * that blackholes port 4455 rather than refusing on it is the case that
+ * matters: the connection hangs, and without this the app waits on it forever.
+ */
+describe('the direct RTL call giving up', () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  /** Re-imports with no backend configured, so the direct call is the only path. */
+  async function directOnly() {
+    vi.stubEnv('VITE_API_BASE', '');
+    vi.resetModules();
+    return import('@/api/rtl');
+  }
+
+  /** Never answers, and rejects on abort exactly as the real `fetch` does. */
+  function hangingFetch() {
+    return vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const fail = () => reject(new DOMException('Aborted', 'AbortError'));
+          // A signal that is already aborted rejects straight away rather than
+          // waiting for an event that has been and gone.
+          if (init?.signal?.aborted) fail();
+          else init?.signal?.addEventListener('abort', fail, { once: true });
+        }),
+    ) as typeof fetch;
+  }
+
+  it('abandons a connection that hangs, even when the caller passed a signal', async () => {
+    const { fetchRouteDetails, RtlApiError } = await directOnly();
+    vi.useFakeTimers();
+    globalThis.fetch = hangingFetch();
+
+    // A signal that is never aborted: exactly what React Query hands a query
+    // that nobody navigates away from.
+    const pending = fetchRouteDetails(new AbortController().signal);
+    const settled = expect(pending).rejects.toBeInstanceOf(RtlApiError);
+    await vi.advanceTimersByTimeAsync(15_000);
+    await settled;
+  });
+
+  it('holds on until the budget is actually spent', async () => {
+    const { fetchRouteDetails } = await directOnly();
+    vi.useFakeTimers();
+    globalThis.fetch = hangingFetch();
+
+    let settled = false;
+    const pending = fetchRouteDetails(new AbortController().signal).catch(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await pending;
+    expect(settled).toBe(true);
+  });
+
+  it('reports a caller-driven abort as a cancellation, not as RTL being down', async () => {
+    const { fetchRouteDetails, RtlApiError } = await directOnly();
+    globalThis.fetch = hangingFetch();
+
+    const controller = new AbortController();
+    const pending = fetchRouteDetails(controller.signal);
+    controller.abort();
+
+    // Dressed up as an RtlApiError this is indistinguishable from a network
+    // failure, and `useTransitGraph` would answer an ordinary unmount with the
+    // offline snapshot.
+    await expect(pending).rejects.not.toBeInstanceOf(RtlApiError);
+  });
+});
+
+/**
+ * Recovering from a fallback.
+ *
+ * The graph is fetched once and held for half an hour, so whether this returns
+ * a delay or `false` decides whether a session that started badly ever gets
+ * better on its own. The snapshot case is the one that used to be missed: it
+ * reports `via: null`, so a rule written only for `via === 'rtl'` left the
+ * worst state as the only one with no way back.
+ */
+describe('nextRecheckDelay', () => {
+  const served = (over: Partial<TransitGraphResult>): TransitGraphResult =>
+    ({ graph: {}, source: 'network', fromCache: false, via: 'backend', ...over }) as TransitGraphResult;
+
+  it('leaves a graph the backend served alone', () => {
+    expect(nextRecheckDelay(served({}), 1, true)).toBe(false);
+  });
+
+  it('re-asks once for a graph RTL served', () => {
+    expect(nextRecheckDelay(served({ via: 'rtl' }), 1, true)).toBe(RECHECK_MS);
+  });
+
+  it('stops after that one re-ask', () => {
+    expect(nextRecheckDelay(served({ via: 'rtl' }), 2, true)).toBe(false);
+  });
+
+  it('does not spend the re-ask while the breaker holds the backend aside', () => {
+    expect(nextRecheckDelay(served({ via: 'rtl' }), 1, false)).toBe(false);
+  });
+
+  it('keeps asking while the app is running on the saved snapshot', () => {
+    const cached = served({ source: 'cache', fromCache: true, via: null });
+    expect(nextRecheckDelay(cached, 1, true)).toBe(RECHECK_MS);
+    // Unbounded, unlike the RTL case: a backend that was merely restarting must
+    // not leave the offline banner up for the rest of the session.
+    expect(nextRecheckDelay(cached, 2, true)).toBe(RECHECK_MS);
+    expect(nextRecheckDelay(cached, 12, true)).toBe(RECHECK_MS);
+  });
+
+  it('keeps asking from the snapshot even while the backend is set aside', () => {
+    // The re-ask falls through to RTL on its own, and reaching RTL is the whole
+    // point when there are no live bus times at all.
+    const cached = served({ source: 'cache', fromCache: true, via: null });
+    expect(nextRecheckDelay(cached, 3, false)).toBe(RECHECK_MS);
+  });
+
+  it('asks nothing before the first answer has arrived', () => {
+    expect(nextRecheckDelay(undefined, 0, true)).toBe(false);
   });
 });

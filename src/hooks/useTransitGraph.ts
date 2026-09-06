@@ -31,11 +31,55 @@ export interface TransitGraphResult {
 }
 
 /**
- * How long to wait before re-asking the backend for a graph RTL ended up
- * serving. A little past the breaker's cooldown, so a backend that has been set
- * aside is being asked *after* it is allowed back rather than during.
+ * How long to wait before re-asking for a graph a fallback ended up serving. A
+ * little past the breaker's cooldown, so a backend that has been set aside is
+ * being asked *after* it is allowed back rather than during.
  */
-const RECHECK_MS = COOLDOWN_MS + 5_000;
+export const RECHECK_MS = COOLDOWN_MS + 5_000;
+
+/**
+ * When to come back to a fallback, rather than living with it — `false` to let
+ * it stand.
+ *
+ * The graph is the only request the app makes at startup, and it is then held
+ * for half an hour, so a single slow or failed answer hands the whole session
+ * to a fallback and nothing but a page reload ever asks again. That is what a
+ * rider reports as "it works after I refresh".
+ *
+ * Two fallbacks, and they do not deserve the same rule.
+ *
+ * Served by RTL: the app works and only the backend's extras are missing, so
+ * exactly one re-ask, which is what `dataUpdateCount` bounds — the first fetch
+ * makes it 1 and the re-ask makes it 2. A backend that has since recovered is
+ * picked back up; one that is still down is then left alone, because every
+ * attempt that fails costs a second download of the whole timetable from RTL —
+ * on mobile data, to learn nothing. It is skipped outright while the breaker is
+ * holding the backend aside, so the one attempt is spent on a backend that is
+ * at least allowed to answer.
+ *
+ * Served from the snapshot: neither path answered and there are no live bus
+ * times at all. This one keeps asking. It is the strictly worse state, so it
+ * cannot also be the one that gives up first — a backend that was merely
+ * restarting would otherwise leave the offline banner up for the rest of the
+ * session, long after both paths came back. It is not gated on the breaker
+ * either: a re-ask that reaches RTL is worth making even while the backend is
+ * set aside, and the fetch falls through to RTL on its own.
+ *
+ * Neither rule runs while the tab is in the background; see
+ * `refetchIntervalInBackground` at the call site.
+ *
+ * Exported as a plain function because it is the whole of the recovery
+ * behaviour, and a decision worth testing without a React tree around it.
+ */
+export function nextRecheckDelay(
+  data: TransitGraphResult | undefined,
+  dataUpdateCount: number,
+  /** Test seam: the breaker state this decision is read against. */
+  worthAsking: boolean = backendWorthAsking(),
+): number | false {
+  if (data?.fromCache) return RECHECK_MS;
+  return data?.via === 'rtl' && dataUpdateCount < 2 && worthAsking ? RECHECK_MS : false;
+}
 
 export function useTransitGraph() {
   return useQuery<TransitGraphResult>({
@@ -52,6 +96,11 @@ export function useTransitGraph() {
         const merged = await mergeWithStoredTimetable(raw);
         return { graph: buildGraph(merged), source: 'network', fromCache: false, via };
       } catch (err) {
+        // A cancellation is not a failure to reach anything, so it must not be
+        // answered with the snapshot — an ordinary unmount would otherwise
+        // raise the offline banner over a session whose network is fine. The
+        // same rule the backend fetcher applies to its breaker.
+        if (signal.aborted) throw err;
         // Offline, or port 4455 blocked with no backend to route around it.
         // Today's saved snapshot still lets the planner work; only live bus
         // times are lost.
@@ -65,26 +114,7 @@ export function useTransitGraph() {
     staleTime: 30 * 60 * 1000,
     gcTime: 24 * 60 * 60 * 1000,
     retry: 2,
-    /**
-     * Come back to a fallback once, rather than living with it.
-     *
-     * This is the only request the app makes at startup, and it is then held
-     * for half an hour — so a single slow or failed answer from the backend
-     * hands the whole session to RTL, and nothing but a page reload ever asks
-     * again. That is what a rider reports as "it works after I refresh".
-     *
-     * Exactly one re-ask, which is what `dataUpdateCount` bounds: the first
-     * fetch makes it 1 and the re-ask makes it 2. A backend that has since
-     * recovered is picked back up; one that is still down is then left alone,
-     * because every attempt that fails costs a second download of the whole
-     * timetable from RTL — on mobile data, to learn nothing. It is skipped
-     * outright while the breaker is holding the backend aside, so the one
-     * attempt is spent on a backend that is at least allowed to answer.
-     */
-    refetchInterval: ({ state }) =>
-      state.data?.via === 'rtl' && state.dataUpdateCount < 2 && backendWorthAsking()
-        ? RECHECK_MS
-        : false,
+    refetchInterval: ({ state }) => nextRecheckDelay(state.data, state.dataUpdateCount),
     refetchIntervalInBackground: false,
   });
 }

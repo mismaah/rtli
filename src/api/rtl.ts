@@ -89,22 +89,38 @@ export type RoadShapeResponse = {
 async function request<T>(url: string, init?: RequestInit, timeoutMs = 15_000): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // The caller's signal is chained onto this one rather than replacing it.
+  // Handing `init.signal` straight to fetch leaves the timeout wired to a
+  // controller nobody is listening to — so a connection that hangs rather than
+  // refusing, which is exactly how a network that blackholes port 4455
+  // behaves, is never given up on and the app waits on it for good.
+  const caller = init?.signal;
+  const onAbort = () => controller.abort();
+  if (caller?.aborted) controller.abort();
+  else caller?.addEventListener('abort', onAbort, { once: true });
+
   try {
     const res = await fetch(url, {
       ...init,
-      signal: init?.signal ?? controller.signal,
+      signal: controller.signal,
       headers: { Accept: 'application/json', ...(init?.headers ?? {}) },
     });
     if (!res.ok) throw new RtlApiError(`RTL responded ${res.status} for ${url}`);
     return (await res.json()) as T;
   } catch (err) {
     if (err instanceof RtlApiError) throw err;
+    // A caller-driven abort is a cancellation, not a failure, and has to reach
+    // the caller as one: dressed up as an `RtlApiError` it is indistinguishable
+    // from RTL being unreachable, and a caller that falls back on error would
+    // take the fallback because of an ordinary unmount.
+    if (caller?.aborted) throw err;
     throw new RtlApiError(
       'Could not reach the RTL bus service. Check your connection and try again.',
       err,
     );
   } finally {
     clearTimeout(timer);
+    caller?.removeEventListener('abort', onAbort);
   }
 }
 
