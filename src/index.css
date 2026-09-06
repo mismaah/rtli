@@ -34,7 +34,7 @@ body {
   /* Thaana leads the stack, but its @font-face declares a `unicode-range`, so it
      is only ever consulted for Thaana codepoints — Latin still renders in the
      system UI face, in every language mode. */
-  font-family: 'Noto Sans Thaana', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+  font-family: 'MV Faseyha', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
     sans-serif;
   /* Kill the 300ms tap delay and iOS double-tap zoom. */
   touch-action: manipulation;
@@ -42,23 +42,34 @@ body {
   overscroll-behavior-y: none;
 }
 
-/* Thaana, bundled rather than borrowed. The names below it are the fonts a
-   Maldivian desktop is likely to have installed, but nothing guarantees one on
-   a phone or a plain Linux box, and Dhivehi with no Thaana font is empty boxes.
-   Google's Noto subset is 24 KB, is precached with the rest of the app, and so
-   renders the same everywhere and offline.
+/* Thaana, bundled rather than borrowed.
+
+   MV Faseyha is the face Dhivehi is actually read in — the one on Maldivian
+   signage and in Maldivian documents — and Noto's Thaana, which was here first,
+   reads as a foreign approximation of it next to that. Hassan Hameed's original
+   (licence: "May be used for all legitimate purposes"), subset to the Thaana
+   block and the three Arabic punctuation marks Dhivehi writes with, is 18 KB for
+   both weights and is precached with the rest of the app, so it renders the same
+   on a phone with no Thaana font installed as on one that has every one.
 
    `unicode-range` keeps it out of the way of the Latin the same strings carry —
-   route numbers, MVR, km — which stays in the app's own stack. */
+   route numbers, MVR, km — which stays in the app's own stack even though the
+   original file has a Latin set of its own. */
 @font-face {
-  font-family: 'Noto Sans Thaana';
+  font-family: 'MV Faseyha';
   font-style: normal;
-  /* One variable file covers the range Google serves for both weights. */
-  font-weight: 400 700;
+  font-weight: 400;
   font-display: swap;
-  src: url('/fonts/NotoSansThaana.woff2') format('woff2');
-  unicode-range: U+060C, U+061B-061C, U+061F, U+0660-066C, U+0780-07B1, U+200C-200F, U+25CC,
-    U+FDF2, U+FDFD;
+  src: url('/fonts/MVFaseyha-Regular.woff2') format('woff2');
+  unicode-range: U+060C, U+061B, U+061F, U+0780-07B1, U+FDF2;
+}
+@font-face {
+  font-family: 'MV Faseyha';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/MVFaseyha-Bold.woff2') format('woff2');
+  unicode-range: U+060C, U+061B, U+061F, U+0780-07B1, U+FDF2;
 }
 
 /* Dhivehi is right-to-left; Thaana needs its own run direction. Elements also
@@ -67,7 +78,12 @@ body {
 .dv {
   direction: rtl;
   unicode-bidi: isolate;
-  font-family: 'Noto Sans Thaana', 'MV Faseyha', 'A_Faruma', 'Faruma', sans-serif;
+  /* The run turns around; the box does not. These are subtitles under an English
+     line in the bilingual mode, and `direction: rtl` alone pins them to the far
+     right of whatever they sit in — which in a full-width row leaves the Dhivehi
+     name stranded across the sheet from the English name it belongs to. */
+  text-align: left;
+  font-family: 'MV Faseyha', 'A_Faruma', 'Faruma', sans-serif;
 }
 
 /* Full Dhivehi mode.
