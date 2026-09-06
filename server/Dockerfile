@@ -12,10 +12,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# Stamped in rather than read from .git, which the build context does not carry.
+# It is what the diagnostics endpoint reports as the running version.
+ARG VERSION=unknown
 # schema.sql is embedded via go:embed, so it travels inside the binary.
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
-      -ldflags="-s -w" \
+      -ldflags="-s -w -X main.buildVersion=${VERSION}" \
       -o /out/rtld ./cmd/rtld
 
 # Run.

@@ -61,18 +61,34 @@ func NewClient(baseURL string) *Client {
 }
 
 func (c *Client) do(ctx context.Context, op, method, path string, body any, out any) error {
+	payload, err := c.send(ctx, op, method, path, body)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(payload, out); err != nil {
+		return &Error{Op: op, Err: err}
+	}
+	return nil
+}
+
+// maxResponseBytes bounds what one upstream response may cost in memory.
+// routedetails, the largest by far, measures a few hundred kilobytes.
+const maxResponseBytes = 16 << 20
+
+// send performs one request and returns the undecoded body.
+func (c *Client) send(ctx context.Context, op, method, path string, body any) ([]byte, error) {
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return &Error{Op: op, Err: err}
+			return nil, &Error{Op: op, Err: err}
 		}
 		reader = bytes.NewReader(encoded)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, reader)
 	if err != nil {
-		return &Error{Op: op, Err: err}
+		return nil, &Error{Op: op, Err: err}
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -81,7 +97,7 @@ func (c *Client) do(ctx context.Context, op, method, path string, body any, out 
 
 	res, err := c.HTTP.Do(req)
 	if err != nil {
-		return &Error{Op: op, Err: err}
+		return nil, &Error{Op: op, Err: err}
 	}
 	defer func() {
 		// Drain before closing so the connection returns to the pool.
@@ -90,12 +106,13 @@ func (c *Client) do(ctx context.Context, op, method, path string, body any, out 
 	}()
 
 	if res.StatusCode != http.StatusOK {
-		return &Error{Op: op, Status: res.StatusCode}
+		return nil, &Error{Op: op, Status: res.StatusCode}
 	}
-	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
-		return &Error{Op: op, Err: err}
+	payload, err := io.ReadAll(io.LimitReader(res.Body, maxResponseBytes))
+	if err != nil {
+		return nil, &Error{Op: op, Err: err}
 	}
-	return nil
+	return payload, nil
 }
 
 type routeCodeBody struct {

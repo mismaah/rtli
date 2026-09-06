@@ -34,6 +34,9 @@ ALLOW_ORIGIN="${ALLOW_ORIGIN:-*}"
 MAX_CONNECTIONS="${MAX_CONNECTIONS:-500}"
 MAX_PER_CLIENT="${MAX_PER_CLIENT:-20}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
+# The public half of the SSH key allowed to call the diagnostics endpoint,
+# as an authorized_keys line. Empty leaves the endpoint unregistered.
+ADMIN_PUBLIC_KEY="${ADMIN_PUBLIC_KEY:-}"
 # The uid:gid the container runs as. Defaults to whoever runs this script, so
 # files on the mounted volume stay owned by them and need no root to inspect.
 RUN_AS="${RUN_AS:-$(id -u):$(id -g)}"
@@ -76,7 +79,7 @@ fi
 # 2. Build before touching the running container, so a broken build leaves the
 #    current deployment up rather than taking the service down with it.
 say "Building $IMAGE"
-docker build -t "$IMAGE" ./server
+docker build --build-arg "VERSION=$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)" -t "$IMAGE" ./server
 
 # 3. Replace the running container.
 say "Replacing $CONTAINER"
@@ -145,6 +148,7 @@ docker run -d \
   --memory 512m \
   --publish "${BIND_ADDR}:${PORT}:8080" \
   --volume "${DATA_DIR}:/data:${VOLUME_OPTS}" \
+  --env "RTLD_ADMIN_KEY=${ADMIN_PUBLIC_KEY}" \
   "$IMAGE" \
   -addr :8080 \
   -db /data/rtld.db \

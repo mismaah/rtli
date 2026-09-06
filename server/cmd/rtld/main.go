@@ -15,15 +15,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/mismaah/rtl-improved/server/internal/api"
 	"github.com/mismaah/rtl-improved/server/internal/hub"
+	"github.com/mismaah/rtl-improved/server/internal/logbuf"
 	"github.com/mismaah/rtl-improved/server/internal/poller"
 	"github.com/mismaah/rtl-improved/server/internal/rollup"
 	"github.com/mismaah/rtl-improved/server/internal/rtl"
+	"github.com/mismaah/rtl-improved/server/internal/sshsig"
 	"github.com/mismaah/rtl-improved/server/internal/store"
 )
 
@@ -49,10 +54,19 @@ func main() {
 		// are not visible from the host, so the only honest test is to try it
 		// from inside the container that will do the writing.
 		check = flag.Bool("check", false, "open the database, verify it is writable, and exit")
+		// The signed diagnostics endpoint. Empty leaves it unregistered, so on
+		// a server that has not been given a key it does not exist at all.
+		adminKey = flag.String("admin-key", envOr("RTLD_ADMIN_KEY", ""),
+			"authorized_keys line(s) permitted to call "+api.AdminPath+"; empty disables it")
+		logBufferSize = flag.Int("log-buffer", envInt("RTLD_LOG_BUFFER", 2000),
+			"how many recent log records to keep in memory for the diagnostics endpoint")
 	)
 	flag.Parse()
 
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
+	// Wrapped, not replaced: stdout stays the record of last resort, and a
+	// process that dies takes the in-memory copy with it.
+	logs := logbuf.New(*logBufferSize)
+	log := slog.New(logs.Handler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLevel(*logLevel)})))
 	slog.SetDefault(log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -73,6 +87,26 @@ func main() {
 		Log:               log,
 		AllowOrigin:       *allowOrigin,
 		TrustProxyHeaders: *trustProxy,
+		Logs:              logs,
+		Version:           version(),
+	}
+
+	// Parsed before anything else starts: a key that will never authenticate
+	// anyone should stop the deploy, not be discovered the next time the
+	// server needs diagnosing.
+	if *adminKey != "" {
+		keys, err := sshsig.ParseAuthorizedKeys(*adminKey)
+		if err != nil {
+			log.Error("could not parse -admin-key", "err", err,
+				"hint", "it takes authorized_keys lines, e.g. the contents of ~/.ssh/id_rsa.pub")
+			os.Exit(1)
+		}
+		options.AdminKeys = keys
+		fingerprints := make([]string, len(keys))
+		for i, key := range keys {
+			fingerprints[i] = ssh.FingerprintSHA256(key)
+		}
+		log.Info("diagnostics endpoint enabled", "path", api.AdminPath, "keys", fingerprints)
 	}
 	if *allowOrigin == "*" {
 		log.Warn("CORS is open to any origin; set -allow-origin to your front end")
@@ -109,6 +143,19 @@ func main() {
 
 			options.Hub = broker
 			options.Poller = live
+
+			// A second handle that SQLite itself will not let write, so a
+			// diagnostic query can never become a change, and a slow one
+			// cannot stall the single connection the poller records through.
+			if len(options.AdminKeys) > 0 {
+				reader, err := store.OpenReadOnly(ctx, *dbPath)
+				if err != nil {
+					log.Error("could not open a read-only handle; diagnostics will not include the store", "err", err)
+				} else {
+					defer reader.Close()
+					options.ReadDB = reader
+				}
+			}
 			log.Info("history and live streaming enabled", "db", *dbPath,
 				"rawRetention", store.RawRetention, "aggregateRetention", store.AggregateRetention,
 				"rollupInterval", rollup.Interval)
@@ -174,6 +221,29 @@ func checkStore(ctx context.Context, path string) error {
 		return fmt.Errorf("write test: %w", err)
 	}
 	return db.DeleteTimetable(ctx, "0000-00-00")
+}
+
+// buildVersion is set at link time by the Docker build; without it the module's
+// own VCS stamp is used, which is present in a plain "go build" from the repo.
+var buildVersion string
+
+func version() string {
+	if buildVersion != "" {
+		return buildVersion
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == "vcs.revision" {
+			if len(setting.Value) > 12 {
+				return setting.Value[:12]
+			}
+			return setting.Value
+		}
+	}
+	return "unknown"
 }
 
 func envInt(key string, fallback int) int {

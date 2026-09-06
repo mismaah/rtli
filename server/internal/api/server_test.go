@@ -592,3 +592,11 @@ func TestCORSWildcardStillAllowsAnyone(t *testing.T) {
 		t.Errorf("Allow-Origin = %q, want *", got)
 	}
 }
+
+// newFront starts a test server in front of an api.Server and returns its URL.
+func newFront(t *testing.T, srv *Server) string {
+	t.Helper()
+	front := httptest.NewServer(srv.Handler())
+	t.Cleanup(front.Close)
+	return front.URL
+}

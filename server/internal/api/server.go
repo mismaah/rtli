@@ -16,10 +16,14 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/ssh"
+
 	"github.com/mismaah/rtl-improved/server/internal/cache"
 	"github.com/mismaah/rtl-improved/server/internal/geo"
 	"github.com/mismaah/rtl-improved/server/internal/hub"
+	"github.com/mismaah/rtl-improved/server/internal/logbuf"
 	"github.com/mismaah/rtl-improved/server/internal/rtl"
+	"github.com/mismaah/rtl-improved/server/internal/store"
 	"github.com/mismaah/rtl-improved/server/internal/track"
 )
 
@@ -84,6 +88,16 @@ type Server struct {
 	// still a perfectly good read-through cache.
 	hub    *hub.Hub
 	poller LiveTracks
+
+	// Optional: set when the admin RPC is enabled. With no key configured the
+	// route is never registered and the endpoint does not exist.
+	version     string
+	adminKeys   []ssh.PublicKey
+	adminOps    map[string]*adminOp
+	adminNonces *nonceCache
+	adminRate   *rateLimiter
+	readDB      *store.DB
+	logs        *logbuf.Buffer
 }
 
 // LiveTracks is the poller's read side, kept as an interface so the API package
@@ -110,6 +124,17 @@ type Options struct {
 	// Hub and Poller enable /v1/live/stream. Both or neither.
 	Hub    *hub.Hub
 	Poller LiveTracks
+	// AdminKeys enables the signed diagnostics RPC at AdminPath. Empty — the
+	// default — leaves the route unregistered, so the endpoint is not merely
+	// closed but absent.
+	AdminKeys []ssh.PublicKey
+	// ReadDB backs the admin store queries. It must be a handle that cannot
+	// write; see store.OpenReadOnly.
+	ReadDB *store.DB
+	// Logs backs the admin log tail.
+	Logs *logbuf.Buffer
+	// Version identifies the running build in admin status.
+	Version string
 }
 
 func NewServer(opts Options) *Server {
@@ -127,7 +152,7 @@ func NewServer(opts Options) *Server {
 			}
 		}
 	}
-	return &Server{
+	server := &Server{
 		rtl:        opts.RTL,
 		log:        opts.Log,
 		origins:    origins,
@@ -139,7 +164,21 @@ func NewServer(opts Options) *Server {
 		startedAt:  time.Now(),
 		hub:        opts.Hub,
 		poller:     opts.Poller,
+
+		version:     opts.Version,
+		adminKeys:   opts.AdminKeys,
+		readDB:      opts.ReadDB,
+		logs:        opts.Logs,
+		adminNonces: newNonceCache(adminNonceWindow),
+		adminRate:   &rateLimiter{limit: adminRatePerMinute},
 	}
+	if server.version == "" {
+		server.version = "unknown"
+	}
+	if server.adminEnabled() {
+		server.adminOps = server.buildAdminOps()
+	}
+	return server
 }
 
 // Handler returns the routed, CORS-wrapped handler.
@@ -152,7 +191,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/etas", s.handleEtas)
 	mux.HandleFunc("GET /v1/live/stream", s.handleLiveStream)
 	mux.HandleFunc("GET /v1/live/{routeCode}", s.handleLive)
-	return s.withCORS(mux)
+
+	public := s.withCORS(mux)
+	if !s.adminEnabled() {
+		return public
+	}
+	// Mounted outside withCORS deliberately. Everything else here is public
+	// data a browser is meant to read cross-origin; this is the one route where
+	// telling a browser it may is exactly wrong. The pattern is registered for
+	// every method so a GET is answered 405 here rather than falling through to
+	// a CORS-tagged 404.
+	outer := http.NewServeMux()
+	outer.HandleFunc(AdminPath, s.handleAdminRPC)
+	outer.Handle("/", public)
+	return outer
 }
 
 // allowOrigin returns the value to echo back, and whether the origin is allowed.

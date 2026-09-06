@@ -195,6 +195,11 @@ Three load-bearing details:
 The container runs `-require-store`, so a database it cannot open is a startup
 failure rather than a silent degrade to cache-only.
 
+`ADMIN_PUBLIC_KEY` in `deploy.env` turns on the diagnostics endpoint, and is the
+only thing passed to the container as an environment variable (`RTLD_ADMIN_KEY`)
+rather than as a flag — `docker run` had no `--env` at all before it. Left empty,
+the route is never registered.
+
 ---
 
 ## Traps that already cost time
@@ -427,7 +432,7 @@ pre-existing, and the server's future arrival-matching must not inherit it.
 ## Verifying
 
 ```bash
-cd server && go test ./...     # 106 tests, includes the golden cross-language check
+cd server && go test ./...     # 151 tests, includes the golden cross-language check
 npm run test                   # 134 tests
 npm run build && npm run preview & npm run e2e   # see the flakiness note above
 ```
@@ -437,6 +442,20 @@ Live checks (use `curl`, not Python — see the bot-protection trap):
 ```bash
 curl -s https://rtli-api.mismaah.com/v1/meta
 curl -sN 'https://rtli-api.mismaah.com/v1/live/stream?routes=133' | head -5
+```
+
+The `sqlite3` recipes below are written to be run **on the server**. Every one of
+them can also be run from anywhere with `rtladm sql "…"` once `ADMIN_PUBLIC_KEY`
+is set — same query, read-only either way, no SSH:
+
+```bash
+go build -o rtladm ./server/cmd/rtladm
+rtladm status                      # the quickest read on whether it is healthy
+rtladm logs -level warn -n 50      # what "docker logs" would have shown
+rtladm sql "SELECT COUNT(*) FROM bus_fix"
+```
+
+```bash
 sqlite3 data/rtld.db "SELECT COUNT(*) FROM bus_fix;"          # on the server
 sqlite3 data/rtld.db "SELECT route_code, fix_count FROM route_activity;"
 

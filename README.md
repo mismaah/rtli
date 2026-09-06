@@ -296,6 +296,44 @@ true age of the reading.
 | `GET /v1/live/stream?routes=…` | SSE: snapshot on connect, then per-bus deltas |
 | `GET /v1/live/{routeCode}` | Plain-JSON positions, for clients that cannot stream |
 | `GET /v1/meta`, `/healthz` | Freshness and liveness |
+| `POST /v1/admin/rpc` | Signed, read-only diagnostics — off unless a key is configured |
+
+#### Diagnosing it remotely
+
+The server runs in a distroless container with no shell, on a home machine
+reached only through a tunnel. That leaves no way to look at the database or the
+logs without sitting at the host — which is what `POST /v1/admin/rpc` is for.
+
+It is **read-only**. Queries run on a second SQLite handle opened `query_only`,
+so a write is refused by SQLite itself rather than by anything inspecting the
+statement first, and there is no operation that flushes a cache, prunes a table
+or restarts anything.
+
+Authentication is an SSH signature over the request body, in the SSHSIG format
+`ssh-keygen -Y sign` produces. The server holds only the public key, in
+`RTLD_ADMIN_KEY`; with none set the route is never registered and the endpoint
+returns 404 like any other unknown path. There is no bearer token to leak,
+because there is no secret on the server at all — and a captured request cannot
+be replayed, since each carries a timestamp and a nonce inside the signed bytes.
+The route is mounted outside the CORS wrapper: it is the one endpoint here that
+a browser must never be told it may read.
+
+`server/cmd/rtladm` is the client:
+
+```bash
+go build -o rtladm ./server/cmd/rtladm
+
+rtladm status                       # uptime, goroutines, cache age, live buses, store size
+rtladm sql "SELECT route_code, COUNT(*) FROM bus_fix GROUP BY 1 ORDER BY 2 DESC"
+rtladm schema                       # tables, row counts, page accounting
+rtladm logs -level warn -n 50       # the server's in-memory log tail
+rtladm upstream livecoordinates -route 133   # what RTL returns to the server
+rtladm stacks                       # goroutine dump, for a hang
+rtladm ops                          # what this server supports
+```
+
+It signs with `~/.ssh/id_rsa` by default, falling back to `ssh-agent` when the
+key needs a passphrase. Point it elsewhere with `-url` or `RTLD_ADMIN_URL`.
 
 The graph is served in RTL's own JSON shape rather than as a prebuilt graph, so
 [`buildGraph.ts`](src/lib/transit/buildGraph.ts) stays the single normalizer and
