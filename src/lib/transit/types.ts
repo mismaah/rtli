@@ -80,11 +80,18 @@ export interface Place extends LatLng {
   current?: boolean;
 }
 
+/**
+ * Which of RTL's three kinds of reading this is. Held as a kind rather than a
+ * finished sentence because ETAs are parsed inside the live overlay, where no
+ * language is in scope — the wording is chosen by whichever screen renders it.
+ */
+export type LiveEtaKind = 'arriving' | 'dispatch' | 'due';
+
 export interface LiveEta {
   /** Minutes until arrival, or 0 when the bus is pulling in. */
   minutes: number;
   vehicleCode: string;
-  label: string;
+  kind: LiveEtaKind;
   /**
    * Minutes since Malé midnight the bus is due, stamped when the reading was
    * taken. `minutes` is only true at the instant it was fetched, and planning

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { nearestStops, searchStops, useStopIndex, usePlaceSearch } from '@/hooks/useStopSearch';
 import { formatDistance, haversineMeters, type LatLng } from '@/lib/geo';
 import { useSavedPlaces } from '@/store/savedPlaces';
-import { usePrefs } from '@/store/prefs';
+import { Dv, stopSecondary, stopText, useT } from '@/i18n';
 import { SIDE_PANEL_WIDTH, useWideLayout } from '@/hooks/useWideLayout';
 import type { Place, Stop, TransitGraph } from '@/lib/transit/types';
 
@@ -26,7 +26,7 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
   const index = useStopIndex(graph);
   const { places, searching } = usePlaceSearch(query);
   const saved = useSavedPlaces((s) => s.places);
-  const showDhivehi = usePrefs((s) => s.showDhivehi);
+  const { t, lang } = useT();
   const wide = useWideLayout();
 
   useEffect(() => {
@@ -68,7 +68,7 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close search"
+          aria-label={t('closeSearch')}
           className="grid size-11 shrink-0 place-items-center rounded-full text-ink-300 active:bg-white/10"
         >
           <svg viewBox="0 0 24 24" className="size-6 fill-current" aria-hidden>
@@ -88,7 +88,7 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
           <button
             type="button"
             onClick={() => setQuery('')}
-            aria-label="Clear"
+            aria-label={t('clear')}
             className="grid size-11 shrink-0 place-items-center rounded-full text-ink-500 active:bg-white/10"
           >
             <svg viewBox="0 0 24 24" className="size-5 fill-current" aria-hidden>
@@ -103,7 +103,7 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
         style={{ paddingBottom: 'calc(var(--safe-bottom) + 1.5rem)' }}
       >
         {savedHits.length > 0 && (
-          <Section label="Saved">
+          <Section label={t('headingSaved')}>
             {savedHits.map((p) => (
               <Row
                 key={p.id}
@@ -116,16 +116,18 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
         )}
 
         {nearby.length > 0 && (
-          <Section label="Nearby stops">
+          <Section label={t('headingNearbyStops')}>
             {nearby.map((s) => (
               <Row
                 key={s.code}
                 icon={<StopIcon />}
-                title={s.name}
+                title={stopText(s, lang)}
                 subtitle={
-                  userPosition ? formatDistance(haversineMeters(userPosition, s) * 1.35) : undefined
+                  userPosition
+                    ? formatDistance(haversineMeters(userPosition, s) * 1.35, t)
+                    : undefined
                 }
-                dv={showDhivehi ? s.dvName : undefined}
+                dv={stopSecondary(s, lang)}
                 onClick={() => onPick(toPlace(s))}
               />
             ))}
@@ -133,14 +135,14 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
         )}
 
         {stopHits.length > 0 && (
-          <Section label="Bus stops">
+          <Section label={t('headingBusStops')}>
             {stopHits.map((s) => (
               <Row
                 key={s.code}
                 icon={<StopIcon />}
-                title={s.name}
+                title={stopText(s, lang)}
                 subtitle={s.routes.join(' · ')}
-                dv={showDhivehi ? s.dvName : undefined}
+                dv={stopSecondary(s, lang)}
                 onClick={() => onPick(toPlace(s))}
               />
             ))}
@@ -148,14 +150,12 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
         )}
 
         {query.trim().length >= 2 && (
-          <Section label="Places">
+          <Section label={t('headingPlaces')}>
             {searching && places.length === 0 && (
-              <p className="px-3 py-4 text-sm text-ink-500">Searching…</p>
+              <p className="px-3 py-4 text-sm text-ink-500">{t('searching')}</p>
             )}
             {!searching && places.length === 0 && (
-              <p className="px-3 py-4 text-sm text-ink-500">
-                No places found. Try a bus stop name instead.
-              </p>
+              <p className="px-3 py-4 text-sm text-ink-500">{t('noPlacesFound')}</p>
             )}
             {places.map((p, i) => (
               <Row
@@ -169,9 +169,7 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
         )}
 
         {!query && savedHits.length === 0 && nearby.length === 0 && (
-          <p className="px-3 py-8 text-center text-sm text-ink-500">
-            Search for a bus stop, a landmark or an address in Greater Malé.
-          </p>
+          <p className="px-3 py-8 text-center text-sm text-ink-500">{t('searchPrompt')}</p>
         )}
       </div>
     </div>
@@ -213,7 +211,7 @@ function Row({
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm text-ink-100">{title}</span>
-        {dv ? <span className="dv block truncate text-xs text-ink-300">{dv}</span> : null}
+        {dv ? <Dv className="block truncate text-xs text-ink-300">{dv}</Dv> : null}
         {subtitle ? <span className="block truncate text-xs text-ink-500">{subtitle}</span> : null}
       </span>
     </button>

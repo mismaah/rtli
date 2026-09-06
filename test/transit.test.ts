@@ -580,7 +580,7 @@ describe('live ETA overlay', () => {
   it('attaches an ETA to the leg boarding that stop', () => {
     const bus = itineraries[0].legs.find((l): l is BusLeg => l.kind === 'bus')!;
     const index: LiveEtaIndex = new Map([
-      [bus.route.code, new Map([[bus.boardStop.code, { minutes: 4, vehicleCode: 'B1', label: '4 min' }]])],
+      [bus.route.code, new Map([[bus.boardStop.code, { minutes: 4, vehicleCode: 'B1', kind: 'due' as const }]])],
     ]);
 
     const merged = mergeLiveEtas(itineraries, index);
@@ -595,7 +595,7 @@ describe('live ETA overlay', () => {
     expect(mergeLiveEtas(itineraries, new Map())).toBe(itineraries);
 
     const irrelevant: LiveEtaIndex = new Map([
-      ['NOPE', new Map([['999', { minutes: 1, vehicleCode: 'B9', label: '1 min' }]])],
+      ['NOPE', new Map([['999', { minutes: 1, vehicleCode: 'B9', kind: 'due' as const }]])],
     ]);
     const merged = mergeLiveEtas(itineraries, irrelevant);
     for (let i = 0; i < itineraries.length; i++) expect(merged[i]).toBe(itineraries[i]);
@@ -620,7 +620,7 @@ describe('planning on live arrivals', () => {
             {
               minutes: Math.round(expectedAt - noon),
               vehicleCode,
-              label: `${Math.round(expectedAt - noon)} min`,
+              kind: 'due' as const,
               expectedAt,
             },
           ],
@@ -645,7 +645,7 @@ describe('planning on live arrivals', () => {
     const at = (minute: number) => ({
       minutes: minute - 597,
       vehicleCode: 'C1180',
-      label: `${minute - 597} min`,
+      kind: 'due' as const,
       expectedAt: minute,
     });
     const liveEtas: LiveEtaIndex = new Map([
@@ -746,7 +746,7 @@ describe('planning on live arrivals', () => {
 
   it('ignores a reading with no time stamped on it', () => {
     const unstamped: LiveEtaIndex = new Map([
-      [booked.route.code, new Map([[booked.boardStop.code, { minutes: 4, vehicleCode: 'B7', label: '4 min' }]])],
+      [booked.route.code, new Map([[booked.boardStop.code, { minutes: 4, vehicleCode: 'B7', kind: 'due' as const }]])],
     ]);
     const plans = planJourney(graph, from, to, { departAt: noon, liveEtas: unstamped });
 
@@ -756,13 +756,13 @@ describe('planning on live arrivals', () => {
 
 describe('parseEta', () => {
   it('reads the numeric form, including the trailing space RTL sends', () => {
-    expect(parseEta('5 Minutes ')).toEqual({ minutes: 5, vehicleCode: '', label: '5 min' });
+    expect(parseEta('5 Minutes ')).toEqual({ minutes: 5, vehicleCode: '', kind: 'due' });
     expect(parseEta('1 Minutes ')?.minutes).toBe(1);
     expect(parseEta('56 Minutes ')?.minutes).toBe(56);
   });
 
   it('reads the two known phrase forms', () => {
-    expect(parseEta('Entering the station')).toMatchObject({ minutes: 0, label: 'Arriving' });
+    expect(parseEta('Entering the station')).toMatchObject({ minutes: 0, kind: 'arriving' });
     expect(parseEta('Send in 5 minutes')).toMatchObject({ minutes: 5 });
   });
 

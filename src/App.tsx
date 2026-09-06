@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BottomSheet, type SheetSnap } from '@/components/BottomSheet';
 import { SearchSheet } from '@/components/SearchSheet';
+import { LanguagePicker } from '@/components/LanguagePicker';
 import { LazyMap } from '@/components/map/LazyMap';
 import { useMap } from '@/components/map/MapContext';
 import { MapPadding } from '@/components/map/MapPadding';
@@ -40,6 +41,8 @@ import {
   type PlaceRef,
 } from '@/lib/transit/places';
 import { readUrlState, writeUrlState } from '@/lib/urlState';
+import { useT } from '@/i18n';
+import { RtlApiError } from '@/api/rtl';
 import type { Itinerary, Place, Stop, WalkLeg } from '@/lib/transit/types';
 
 type View = 'home' | 'results' | 'detail' | 'stop' | 'saved';
@@ -51,6 +54,15 @@ export default function App() {
   const geo = useGeolocation(true);
   const online = useOnline();
   const wide = useWideLayout();
+  const { t, lang } = useT();
+
+  // Drives screen-reader voice selection and text segmentation. The layout stays
+  // left-to-right in every mode — only the Thaana runs themselves are RTL — so
+  // `dir` deliberately does not move with it.
+  useEffect(() => {
+    document.documentElement.lang = lang === 'dv' ? 'dv' : 'en';
+    document.documentElement.dataset.uiLang = lang;
+  }, [lang]);
 
   const [origin, setOrigin] = useState<Place | null>(null);
   const [destination, setDestination] = useState<Place | null>(null);
@@ -385,7 +397,7 @@ export default function App() {
     ) : null;
 
   if (isError) {
-    return <FatalError message={(error as Error).message} onRetry={() => refetch()} />;
+    return <FatalError error={error} onRetry={() => refetch()} />;
   }
 
   return (
@@ -437,7 +449,7 @@ export default function App() {
             style={{ bottom: sheetHeightPx + 12 }}
           >
             <LocateIcon />
-            Recentre
+            {t('recentre')}
           </button>
         )}
 
@@ -445,25 +457,31 @@ export default function App() {
           className="pointer-events-none absolute inset-x-0 top-0 z-10 px-4"
           style={{ paddingTop: 'calc(var(--safe-top) + 0.75rem)' }}
         >
-          <div className="pointer-events-auto inline-flex items-center gap-2 rounded-full bg-ink-900/85 px-3 py-1.5 backdrop-blur">
-            <span className="text-sm font-bold tracking-tight text-ink-100">RTL Improved</span>
-            <span className="text-[10px] text-ink-500">Greater Malé</span>
+          <div className="flex items-start justify-between gap-2">
+            <div className="pointer-events-auto inline-flex items-center gap-2 rounded-full bg-ink-900/85 px-3 py-1.5 backdrop-blur">
+              <span className="text-sm font-bold tracking-tight text-ink-100">RTL Improved</span>
+              <span className="text-[10px] text-ink-500">{t('region')}</span>
+            </div>
+            <LanguagePicker />
           </div>
 
           {(!online || data?.fromCache) && (
             <div className="pointer-events-auto mt-2 inline-flex items-center gap-2 rounded-full bg-amber-500/15 px-3 py-1.5 text-[11px] font-medium text-amber-200 backdrop-blur">
               <span className="size-1.5 rounded-full bg-amber-400" />
-              Offline — using today's saved timetable. No live bus times.
+              {t('offline')}
             </div>
           )}
         </header>
       </div>
 
       <BottomSheet snap={snap} onSnapChange={setSnap} footer={sheetFooter}>
-        {isLoading && <p className="py-8 text-center text-sm text-ink-500">Loading bus routes…</p>}
+        {isLoading && (
+          <p className="py-8 text-center text-sm text-ink-500">{t('loadingRoutes')}</p>
+        )}
 
         {graph && view === 'home' && (
           <Home
+            graph={graph}
             origin={origin}
             destination={destination}
             geoStatus={geo.status}
@@ -481,6 +499,7 @@ export default function App() {
 
         {graph && view === 'results' && origin && destination && (
           <Results
+            graph={graph}
             origin={origin}
             destination={destination}
             itineraries={itineraries}
@@ -501,6 +520,7 @@ export default function App() {
         {graph && view === 'detail' && selected && !journey.active && (
           <TripDetail
             itinerary={walkedDetail ?? selected}
+            graph={graph}
             liveApplied={liveApplied}
             onBack={() => {
               setSelected(null);
@@ -512,6 +532,7 @@ export default function App() {
         {graph && journey.active && walkedDetail && (
           <JourneyNav
             itinerary={walkedDetail}
+            graph={graph}
             journey={journey}
             rideStops={rideStops}
             position={journey.position}
@@ -546,10 +567,10 @@ export default function App() {
           userPosition={geo.position}
           title={
             searching === 'origin'
-              ? 'Where from?'
+              ? t('searchFrom')
               : searching === 'destination'
-                ? 'Where to?'
-                : 'Save a place'
+                ? t('searchTo')
+                : t('searchSave')
           }
           onPick={handlePick}
           onClose={() => setSearching(null)}
@@ -633,22 +654,27 @@ function FitBoundsInner({ points }: { points: { lat: number; lng: number }[] }) 
   return null;
 }
 
-function FatalError({ message, onRetry }: { message: string; onRetry: () => void }) {
+function FatalError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  const { t } = useT();
+  // Known failures carry a catalogue key; anything else falls back to whatever
+  // the throw site said, which is English but is also the only detail there is.
+  const message =
+    error instanceof RtlApiError && error.messageKey
+      ? t(error.messageKey)
+      : ((error as Error)?.message ?? t('apiUnreachable'));
+
   return (
     <div className="grid h-[100dvh] place-items-center bg-ink-950 px-6 text-center">
       <div className="max-w-sm">
-        <h1 className="text-lg font-semibold text-ink-100">Can’t reach the bus service</h1>
+        <h1 className="text-lg font-semibold text-ink-100">{t('fatalTitle')}</h1>
         <p className="mt-2 text-sm text-ink-300">{message}</p>
-        <p className="mt-3 text-xs text-ink-500">
-          RTL's API is served on port 4455, which some networks block. If you're on hotel or office
-          Wi-Fi, try mobile data.
-        </p>
+        <p className="mt-3 text-xs text-ink-500">{t('fatalPortHint')}</p>
         <button
           type="button"
           onClick={onRetry}
           className="mt-5 min-h-11 rounded-xl bg-brand-500 px-6 text-sm font-semibold text-white active:bg-brand-400"
         >
-          Try again
+          {t('tryAgain')}
         </button>
       </div>
     </div>

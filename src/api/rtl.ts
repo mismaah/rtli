@@ -11,13 +11,23 @@
  * or reachable. Every call site above this file is unchanged by its presence.
  */
 import { fetchFromBackend, GRAPH_TIMEOUT_MS } from './backend';
+import type { CatalogKey } from '@/i18n/types';
 
 const BOOKING_BASE = 'https://bo.rtl.mv:4455/maldives/api';
 
 export class RtlApiError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
+  /**
+   * Catalogue key for the rider-facing wording, where there is one. The
+   * `message` stays English and stays specific — it is what lands in a log — so
+   * the screen that shows the failure translates this instead.
+   */
+  readonly messageKey?: CatalogKey;
+
+  constructor(message: string, cause?: unknown, messageKey?: CatalogKey) {
     super(message);
     this.name = 'RtlApiError';
+    this.cause = cause;
+    this.messageKey = messageKey;
   }
 }
 
@@ -117,6 +127,7 @@ async function request<T>(url: string, init?: RequestInit, timeoutMs = 15_000): 
     throw new RtlApiError(
       'Could not reach the RTL bus service. Check your connection and try again.',
       err,
+      'apiUnreachable',
     );
   } finally {
     clearTimeout(timer);

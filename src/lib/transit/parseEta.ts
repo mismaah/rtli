@@ -1,3 +1,5 @@
+import { enT } from '@/i18n/translate';
+import type { T } from '@/i18n/types';
 import type { LiveEta } from './types';
 
 /**
@@ -15,21 +17,37 @@ export function parseEta(raw: string | null | undefined, vehicleCode = ''): Live
 
   // Bus is pulling into the stop right now.
   if (lower.includes('entering the station')) {
-    return { minutes: 0, vehicleCode, label: 'Arriving' };
+    return { minutes: 0, vehicleCode, kind: 'arriving' };
   }
 
   // "Send in 5 minutes" — dispatch from the terminal, not yet en route.
   const dispatch = /^send in (\d+)\s*min/i.exec(text);
   if (dispatch) {
     const minutes = Number(dispatch[1]);
-    return { minutes, vehicleCode, label: `Departs terminal in ${minutes} min` };
+    return { minutes, vehicleCode, kind: 'dispatch' };
   }
 
   const mins = /^(\d+)\s*min/i.exec(text);
   if (mins) {
     const minutes = Number(mins[1]);
-    return { minutes, vehicleCode, label: minutes <= 1 ? '1 min' : `${minutes} min` };
+    return { minutes, vehicleCode, kind: 'due' };
   }
 
   return null;
+}
+
+/**
+ * The reading as a sentence. `1 min` covers everything under a minute: RTL
+ * counts down to "1 Minutes" and then stops, and "0 min" would read as though
+ * the bus were already there when it is not.
+ */
+export function formatEta(eta: LiveEta, t: T = enT): string {
+  switch (eta.kind) {
+    case 'arriving':
+      return t('etaArriving');
+    case 'dispatch':
+      return t('etaDispatch', { n: eta.minutes });
+    default:
+      return t('etaMinutes', { n: Math.max(1, eta.minutes) });
+  }
 }

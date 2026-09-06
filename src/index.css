@@ -31,18 +31,55 @@ body {
   margin: 0;
   background: var(--color-ink-950);
   color: var(--color-ink-100);
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  /* Thaana leads the stack, but its @font-face declares a `unicode-range`, so it
+     is only ever consulted for Thaana codepoints — Latin still renders in the
+     system UI face, in every language mode. */
+  font-family: 'Noto Sans Thaana', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    sans-serif;
   /* Kill the 300ms tap delay and iOS double-tap zoom. */
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   overscroll-behavior-y: none;
 }
 
-/* Dhivehi is right-to-left; Thaana needs its own run direction. */
+/* Thaana, bundled rather than borrowed. The names below it are the fonts a
+   Maldivian desktop is likely to have installed, but nothing guarantees one on
+   a phone or a plain Linux box, and Dhivehi with no Thaana font is empty boxes.
+   Google's Noto subset is 24 KB, is precached with the rest of the app, and so
+   renders the same everywhere and offline.
+
+   `unicode-range` keeps it out of the way of the Latin the same strings carry —
+   route numbers, MVR, km — which stays in the app's own stack. */
+@font-face {
+  font-family: 'Noto Sans Thaana';
+  font-style: normal;
+  /* One variable file covers the range Google serves for both weights. */
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/fonts/NotoSansThaana.woff2') format('woff2');
+  unicode-range: U+060C, U+061B-061C, U+061F, U+0660-066C, U+0780-07B1, U+200C-200F, U+25CC,
+    U+FDF2, U+FDFD;
+}
+
+/* Dhivehi is right-to-left; Thaana needs its own run direction. Elements also
+   carry `dir="rtl"` (see `Dv` in src/i18n/names.tsx) so that truncation, copy
+   and the accessibility tree agree with what is drawn. */
 .dv {
   direction: rtl;
   unicode-bidi: isolate;
-  font-family: 'MV Faseyha', 'A_Faruma', 'Faruma', sans-serif;
+  font-family: 'Noto Sans Thaana', 'MV Faseyha', 'A_Faruma', 'Faruma', sans-serif;
+}
+
+/* Full Dhivehi mode.
+   The layout is deliberately not mirrored — the sheet, the back arrows and the
+   timeline rail stay exactly where an English reader left them. Only the text
+   turns around, and it does so per run: `plaintext` takes each element's
+   direction from its own first strong character, so a Dhivehi sentence reads
+   right-to-left while a stop RTL only names in English ("Raalhugandu") keeps
+   reading left-to-right beside it. `.dv` is left alone — it already states its
+   direction outright, which is stronger than a guess. */
+[data-ui-lang='dv'] :is(h1, h2, h3, p, li, span, button, label, input):not(.dv) {
+  unicode-bidi: plaintext;
 }
 
 .no-scrollbar::-webkit-scrollbar {

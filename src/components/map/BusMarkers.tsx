@@ -9,6 +9,7 @@ import { readableOn } from '@/components/RouteChip';
 import type { Route } from '@/lib/transit/types';
 import { BusTrails } from './BusTrails';
 import { useMap } from './MapContext';
+import { routeText, useT } from '@/i18n';
 
 interface MarkerEntry {
   marker: maplibregl.Marker;
@@ -311,6 +312,7 @@ function frameForPopup(map: maplibregl.Map, center: [number, number]) {
  */
 function BusInfo({ track, route, updatedAt }: { track: BusTrack; route: Route; updatedAt: number }) {
   const now = useTicker();
+  const { t, lang } = useT();
   const stopped = isStopped(track, now);
 
   return (
@@ -322,17 +324,17 @@ function BusInfo({ track, route, updatedAt }: { track: BusTrack; route: Route; u
         >
           {route.routeNumber}
         </span>
-        <span className="min-w-0 truncate text-xs text-ink-300">{route.name}</span>
+        <span className="min-w-0 truncate text-xs text-ink-300">{routeText(route, lang)}</span>
       </div>
 
       <p className="mt-2 text-sm font-semibold">
-        {track.plateNumber || 'Unmarked bus'}
+        {track.plateNumber || t('unmarkedBus')}
         <span className="ml-1.5 text-[11px] font-normal text-ink-500">{track.busCode}</span>
       </p>
 
       <p className="mt-2.5 flex items-center gap-1.5 border-t border-white/10 pt-2.5 text-xs">
         {track.heading === null ? (
-          <span className="text-ink-500">Direction not known yet</span>
+          <span className="text-ink-500">{t('directionUnknown')}</span>
         ) : (
           <>
             <svg
@@ -345,13 +347,17 @@ function BusInfo({ track, route, updatedAt }: { track: BusTrack; route: Route; u
             </svg>
             {stopped ? (
               <span>
-                <span className="text-amber-200">Stopped</span> — last headed{' '}
-                {compassPoint(track.heading)}
+                <span className="text-amber-200">{t('stopped')}</span>{' '}
+                {t('lastHeaded', { direction: compassPoint(track.heading, t) })}
               </span>
             ) : (
               <span>
-                Heading {compassPoint(track.heading)}
-                {track.speedMps !== null && ` · ${formatSpeed(track.speedMps)}`}
+                {track.speedMps === null
+                  ? t('headingTowards', { direction: compassPoint(track.heading, t) })
+                  : t('headingTowardsAtSpeed', {
+                      direction: compassPoint(track.heading, t),
+                      speed: formatSpeed(track.speedMps, t),
+                    })}
               </span>
             )}
           </>
@@ -359,13 +365,14 @@ function BusInfo({ track, route, updatedAt }: { track: BusTrack; route: Route; u
       </p>
 
       <p className="mt-1 text-[11px] text-ink-500">
-        Updated {formatAgo(now - (updatedAt || now))} · moved {formatAgo(now - track.movedAt)}
+        {t('updatedAndMoved', {
+          updated: formatAgo(now - (updatedAt || now), t),
+          moved: formatAgo(now - track.movedAt, t),
+        })}
       </p>
 
       <p className="mt-2 text-[10px] leading-snug text-ink-500">
-        {track.heading === null
-          ? 'RTL reports position only — direction appears once the bus has moved.'
-          : 'Direction and speed are estimated from recent positions.'}
+        {track.heading === null ? t('positionOnlyNote') : t('inferredMotionNote')}
       </p>
     </div>
   );

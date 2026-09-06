@@ -1,3 +1,6 @@
+import { enT } from '@/i18n/translate';
+import type { T } from '@/i18n/types';
+
 export interface LatLng {
   lat: number;
   lng: number;
@@ -43,14 +46,14 @@ export function bearingDegrees(a: LatLng, b: LatLng): number {
 }
 
 const COMPASS = [
-  'north', 'north-east', 'east', 'south-east',
-  'south', 'south-west', 'west', 'north-west',
+  'compassNorth', 'compassNorthEast', 'compassEast', 'compassSouthEast',
+  'compassSouth', 'compassSouthWest', 'compassWest', 'compassNorthWest',
 ] as const;
 
 /** 45 -> "north-east". Eight points is as precise as an inferred heading deserves. */
-export function compassPoint(degrees: number): string {
+export function compassPoint(degrees: number, t: T = enT): string {
   const normalized = ((degrees % 360) + 360) % 360;
-  return COMPASS[Math.round(normalized / 45) % 8];
+  return t(COMPASS[Math.round(normalized / 45) % 8]);
 }
 
 /** Straight-line distance inflated by the detour factor. */
@@ -68,9 +71,11 @@ export function walkSeconds(meters: number): number {
   return Math.round(meters / WALK_SPEED_MPS + WALK_OVERHEAD_SEC);
 }
 
-export function formatDistance(meters: number): string {
+export function formatDistance(meters: number, t: T = enT): string {
   const m = Math.round(meters);
-  return m < 1000 ? `${m} m` : `${(m / 1000).toFixed(1)} km`;
+  return m < 1000
+    ? t('distanceMetres', { n: m })
+    : t('distanceKilometres', { n: (m / 1000).toFixed(1) });
 }
 
 /** Douglas–Peucker on [lng, lat] pairs. Keeps route shapes light on mobile. */

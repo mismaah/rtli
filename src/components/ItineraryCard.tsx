@@ -2,6 +2,7 @@ import { Fragment } from 'react';
 import { formatClock, formatDuration } from '@/lib/time';
 import { formatDistance } from '@/lib/geo';
 import { totalDistanceM } from '@/lib/transit/plan';
+import { useT } from '@/i18n';
 import type { Itinerary } from '@/lib/transit/types';
 import { RouteChip } from './RouteChip';
 
@@ -11,6 +12,7 @@ interface Props {
 }
 
 export function ItineraryCard({ itinerary, onSelect }: Props) {
+  const { t } = useT();
   const duration = itinerary.arriveAt - itinerary.departAt;
   const busLegs = itinerary.legs.filter((l) => l.kind === 'bus');
   const firstBus = busLegs[0];
@@ -23,7 +25,7 @@ export function ItineraryCard({ itinerary, onSelect }: Props) {
       className="w-full rounded-2xl border border-white/10 bg-ink-800/70 p-4 text-left transition-colors active:bg-ink-700/70"
     >
       <div className="flex items-baseline justify-between gap-3">
-        <div className="text-2xl font-semibold tabular-nums">{formatDuration(duration)}</div>
+        <div className="text-2xl font-semibold tabular-nums">{formatDuration(duration, t)}</div>
         <div className="text-sm tabular-nums text-ink-300">
           {formatClock(itinerary.departAt)} – {formatClock(itinerary.arriveAt)}
         </div>
@@ -38,7 +40,7 @@ export function ItineraryCard({ itinerary, onSelect }: Props) {
             ) : (
               <span className="inline-flex items-center gap-1 text-[11px] text-ink-300">
                 <WalkIcon />
-                {formatDistance(leg.meters)}
+                {formatDistance(leg.meters, t)}
               </span>
             )}
           </Fragment>
@@ -49,28 +51,32 @@ export function ItineraryCard({ itinerary, onSelect }: Props) {
         <span>
           {itinerary.transfers === 0
             ? busLegs.length === 0
-              ? 'Walk the whole way'
-              : 'Direct'
-            : `${itinerary.transfers} transfer${itinerary.transfers > 1 ? 's' : ''}`}
+              ? t('walkWholeWay')
+              : t('direct')
+            : t(itinerary.transfers > 1 ? 'transfersMany' : 'transfersOne', {
+                n: itinerary.transfers,
+              })}
         </span>
         {itinerary.totalFare > 0 && (
-          <span className="font-medium text-ink-300">MVR {itinerary.totalFare.toFixed(2)}</span>
+          <span className="font-medium text-ink-300">
+            {t('fare', { amount: itinerary.totalFare.toFixed(2) })}
+          </span>
         )}
-        <span>{formatDistance(totalDistanceM(itinerary))}</span>
-        <span>{formatDistance(itinerary.totalWalkM)} walk</span>
+        <span>{formatDistance(totalDistanceM(itinerary), t)}</span>
+        <span>{t('distanceWalk', { dist: formatDistance(itinerary.totalWalkM, t) })}</span>
 
         {live && (
           <span className="inline-flex items-center gap-1 font-medium text-live-500">
             <span className="size-1.5 animate-pulse rounded-full bg-live-500" />
-            {live.minutes === 0 ? 'Arriving now' : `Next in ${live.minutes} min`}
+            {live.minutes === 0 ? t('arrivingNow') : t('nextIn', { n: live.minutes })}
           </span>
         )}
         {itinerary.estimated && (
           <span
             className="rounded bg-amber-500/15 px-1.5 py-0.5 font-medium text-amber-300"
-            title="This route has no published timetable, so times are estimated from typical frequency."
+            title={t('estimatedTitle')}
           >
-            Estimated
+            {t('estimated')}
           </span>
         )}
       </div>

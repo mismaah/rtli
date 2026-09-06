@@ -34,6 +34,9 @@ export function StopMarkers({ stops, onSelect, highlighted = [], dimmed = [] }: 
         geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
         properties: {
           code: s.code,
+          // English, in every language mode: the basemap's only fontstack is
+          // OpenFreeMap's "Noto Sans Regular", which carries no Thaana glyphs,
+          // so a Dhivehi label here would draw as nothing at all.
           name: s.name,
           highlighted: highlighted.includes(s.code) ? 1 : 0,
           dimmed: dimmed.includes(s.code) ? 1 : 0,
@@ -90,6 +93,9 @@ export function StopMarkers({ stops, onSelect, highlighted = [], dimmed = [] }: 
         // Labels only once zoomed in, otherwise they collide into mush.
         minzoom: 14,
         layout: {
+          // Named explicitly: the spec default is "Open Sans Regular", which
+          // this tile server does not serve.
+          'text-font': ['Noto Sans Regular'],
           'text-field': ['get', 'name'],
           'text-size': 11,
           'text-offset': [0, 1.1],

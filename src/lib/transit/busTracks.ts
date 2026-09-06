@@ -1,3 +1,5 @@
+import { enT } from '@/i18n/translate';
+import type { T } from '@/i18n/types';
 import { bearingDegrees, haversineMeters, type LatLng } from '@/lib/geo';
 import type { LiveBus } from '@/api/rtl';
 
@@ -290,6 +292,6 @@ export function isStopped(track: BusTrack, now: number): boolean {
   return now - track.movedAt >= STOPPED_AFTER_MS;
 }
 
-export function formatSpeed(speedMps: number): string {
-  return `${Math.round(speedMps * 3.6)} km/h`;
+export function formatSpeed(speedMps: number, t: T = enT): string {
+  return t('speedKmh', { n: Math.round(speedMps * 3.6) });
 }

@@ -10,7 +10,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "smoke": "tsx scripts/smoke.ts",
-    "e2e": "node scripts/e2e.mjs"
+    "e2e": "node scripts/e2e.mjs",
+    "i18n:dv": "tsx scripts/translate-dv.ts"
   },
   "dependencies": {
     "@tanstack/query-sync-storage-persister": "^5.62.7",

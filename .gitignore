@@ -2,6 +2,9 @@ node_modules
 dist
 dev-dist
 *.local
+
+# API key for the Dhivehi translation script (scripts/translate-dv.ts)
+.openroutertoken
 .DS_Store
 *.tsbuildinfo
 

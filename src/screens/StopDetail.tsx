@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { fetchStopEtas } from '@/api/rtl';
-import { parseEta } from '@/lib/transit/parseEta';
+import { formatEta, parseEta } from '@/lib/transit/parseEta';
 import { usePageVisible } from '@/hooks/usePageVisible';
-import { usePrefs } from '@/store/prefs';
+import { Dv, routeText, stopSecondary, stopText, useT } from '@/i18n';
 import { RouteChip } from '@/components/RouteChip';
 import type { Stop, TransitGraph } from '@/lib/transit/types';
 
@@ -18,7 +18,8 @@ const POLL_MS = 20_000;
 
 export function StopDetail({ stop, graph, onClose, onRouteFrom, onRouteTo }: Props) {
   const visible = usePageVisible();
-  const showDhivehi = usePrefs((s) => s.showDhivehi);
+  const { t, lang } = useT();
+  const dvName = stopSecondary(stop, lang);
 
   const { data: arrivals, isLoading } = useQuery({
     queryKey: ['rtl', 'stop-etas', stop.code, stop.routes],
@@ -55,16 +56,14 @@ export function StopDetail({ stop, graph, onClose, onRouteFrom, onRouteTo }: Pro
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h2 className="truncate text-lg font-semibold text-ink-100">{stop.name}</h2>
-          {showDhivehi && stop.dvName && (
-            <p className="dv truncate text-sm text-ink-300">{stop.dvName}</p>
-          )}
-          <p className="mt-0.5 text-xs text-ink-500">Stop {stop.code}</p>
+          <h2 className="truncate text-lg font-semibold text-ink-100">{stopText(stop, lang)}</h2>
+          {dvName && <Dv className="block truncate text-sm text-ink-300">{dvName}</Dv>}
+          <p className="mt-0.5 text-xs text-ink-500">{t('stopCode', { code: stop.code })}</p>
         </div>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close"
+          aria-label={t('close')}
           className="grid size-10 shrink-0 place-items-center rounded-full text-ink-500 active:bg-white/10"
         >
           <svg viewBox="0 0 24 24" className="size-5 fill-current" aria-hidden>
@@ -79,28 +78,26 @@ export function StopDetail({ stop, graph, onClose, onRouteFrom, onRouteTo }: Pro
           onClick={() => onRouteFrom(stop)}
           className="min-h-11 flex-1 rounded-xl border border-white/10 bg-ink-800 text-sm font-medium text-ink-100 active:bg-ink-700"
         >
-          Start here
+          {t('startHere')}
         </button>
         <button
           type="button"
           onClick={() => onRouteTo(stop)}
           className="min-h-11 flex-1 rounded-xl bg-brand-500 text-sm font-semibold text-white active:bg-brand-400"
         >
-          Go here
+          {t('goHere')}
         </button>
       </div>
 
       <section>
         <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
-          Next buses
+          {t('nextBuses')}
         </h3>
 
-        {isLoading && <p className="text-sm text-ink-500">Checking live arrivals…</p>}
+        {isLoading && <p className="text-sm text-ink-500">{t('checkingArrivals')}</p>}
 
         {!isLoading && (arrivals?.length ?? 0) === 0 && (
-          <p className="text-sm text-ink-500">
-            No live arrivals reported for this stop right now.
-          </p>
+          <p className="text-sm text-ink-500">{t('noArrivals')}</p>
         )}
 
         <div className="overflow-hidden rounded-xl bg-ink-900">
@@ -114,15 +111,17 @@ export function StopDetail({ stop, graph, onClose, onRouteFrom, onRouteTo }: Pro
               >
                 <RouteChip route={route} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm text-ink-100">{route.name}</span>
+                  <span className="block truncate text-sm text-ink-100">
+                    {routeText(route, lang)}
+                  </span>
                   {a.destination && (
                     <span className="block truncate text-xs text-ink-500">
-                      towards {a.destination}
+                      {t('towards', { name: a.destination })}
                     </span>
                   )}
                 </span>
                 <span className="shrink-0 text-sm font-semibold tabular-nums text-live-500">
-                  {a.eta.minutes === 0 ? 'Now' : `${a.eta.minutes} min`}
+                  {a.eta.minutes === 0 ? t('now') : formatEta(a.eta, t)}
                 </span>
               </div>
             );
@@ -132,7 +131,7 @@ export function StopDetail({ stop, graph, onClose, onRouteFrom, onRouteTo }: Pro
 
       <section>
         <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
-          Routes serving this stop
+          {t('routesServingStop')}
         </h3>
         <div className="flex flex-wrap gap-2">
           {stop.routes.map((code) => {

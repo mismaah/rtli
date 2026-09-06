@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { useSavedPlaces, type SavedPlace } from '@/store/savedPlaces';
+import { useT } from '@/i18n';
+import type { T } from '@/i18n';
 
 const ICONS = ['🏠', '💼', '🏫', '🕌', '🏥', '🛒', '🏖️', '📍'];
 
@@ -8,15 +10,16 @@ export function Saved({ onClose, onAdd }: { onClose: () => void; onAdd: () => vo
   const rename = useSavedPlaces((s) => s.rename);
   const remove = useSavedPlaces((s) => s.remove);
   const [editing, setEditing] = useState<string | null>(null);
+  const { t } = useT();
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold text-ink-100">Saved places</h2>
+        <h2 className="text-lg font-semibold text-ink-100">{t('savedPlaces')}</h2>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close"
+          aria-label={t('close')}
           className="grid size-10 place-items-center rounded-full text-ink-500 active:bg-white/10"
         >
           <svg viewBox="0 0 24 24" className="size-5 fill-current" aria-hidden>
@@ -30,13 +33,12 @@ export function Saved({ onClose, onAdd }: { onClose: () => void; onAdd: () => vo
         onClick={onAdd}
         className="min-h-11 w-full rounded-xl border border-dashed border-white/20 text-sm font-medium text-brand-400 active:bg-white/5"
       >
-        + Add a place
+        {t('addAPlace')}
       </button>
 
       {places.length === 0 ? (
         <p className="px-1 py-6 text-center text-sm text-ink-500">
-          Save the places you travel to often — they show up on the home screen and at the top of
-          search. Saved places stay on this device.
+          {t('savedEmpty')}
         </p>
       ) : (
         <div className="overflow-hidden rounded-xl bg-ink-900">
@@ -44,6 +46,7 @@ export function Saved({ onClose, onAdd }: { onClose: () => void; onAdd: () => vo
             editing === p.id ? (
               <EditRow
                 key={p.id}
+                t={t}
                 place={p}
                 onSave={(name, icon) => {
                   rename(p.id, name, icon);
@@ -69,7 +72,7 @@ export function Saved({ onClose, onAdd }: { onClose: () => void; onAdd: () => vo
                   onClick={() => setEditing(p.id)}
                   className="min-h-10 shrink-0 rounded-lg px-3 text-xs font-medium text-brand-400 active:bg-white/5"
                 >
-                  Edit
+                  {t('edit')}
                 </button>
               </div>
             ),
@@ -81,11 +84,13 @@ export function Saved({ onClose, onAdd }: { onClose: () => void; onAdd: () => vo
 }
 
 function EditRow({
+  t,
   place,
   onSave,
   onCancel,
   onDelete,
 }: {
+  t: T;
   place: SavedPlace;
   onSave: (name: string, icon: string) => void;
   onCancel: () => void;
@@ -100,7 +105,7 @@ function EditRow({
         value={name}
         onChange={(e) => setName(e.target.value)}
         className="h-11 w-full rounded-lg bg-ink-800 px-3 text-sm text-ink-100 outline-none focus:ring-2 focus:ring-brand-500"
-        placeholder="Name"
+        placeholder={t('namePlaceholder')}
       />
       <div className="flex flex-wrap gap-1.5">
         {ICONS.map((emoji) => (
@@ -123,7 +128,7 @@ function EditRow({
           onClick={onDelete}
           className="min-h-10 rounded-lg px-3 text-xs font-medium text-red-400 active:bg-red-500/10"
         >
-          Delete
+          {t('delete')}
         </button>
         <span className="flex-1" />
         <button
@@ -131,14 +136,14 @@ function EditRow({
           onClick={onCancel}
           className="min-h-10 rounded-lg px-3 text-xs font-medium text-ink-300 active:bg-white/5"
         >
-          Cancel
+          {t('cancel')}
         </button>
         <button
           type="button"
           onClick={() => onSave(name.trim() || place.name, icon)}
           className="min-h-10 rounded-lg bg-brand-500 px-4 text-xs font-semibold text-white active:bg-brand-400"
         >
-          Save
+          {t('save')}
         </button>
       </div>
     </div>

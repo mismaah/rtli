@@ -1,3 +1,6 @@
+import { enT } from '@/i18n/translate';
+import type { T } from '@/i18n/types';
+
 /**
  * All RTL schedule times are Malé local time (UTC+05:00, no DST ever).
  * Everything here is pinned to that offset so the app stays correct even when
@@ -36,13 +39,18 @@ export function formatClock(minutes: number): string {
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
-/** Compact human duration: 5 -> "5 min", 95 -> "1 hr 35 min". */
-export function formatDuration(minutes: number): string {
+/**
+ * Compact human duration: 5 -> "5 min", 95 -> "1 hr 35 min".
+ *
+ * `t` defaults to English so callers with no language in scope — and the tests
+ * that pin the English wording — need not thread one through.
+ */
+export function formatDuration(minutes: number, t: T = enT): string {
   const total = Math.max(0, Math.round(minutes));
-  if (total < 60) return `${total} min`;
+  if (total < 60) return t('durationMinutes', { n: total });
   const h = Math.floor(total / 60);
   const m = total % 60;
-  return m === 0 ? `${h} hr` : `${h} hr ${m} min`;
+  return m === 0 ? t('durationHours', { n: h }) : t('durationHoursMinutes', { h, m });
 }
 
 /**
@@ -50,14 +58,14 @@ export function formatDuration(minutes: number): string {
  * Seconds matter here — a rider deciding whether to trust a bus dot on the map
  * wants to know if it is four seconds old or four minutes.
  */
-export function formatAgo(ms: number): string {
+export function formatAgo(ms: number, t: T = enT): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 3) return 'just now';
-  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3) return t('agoJustNow');
+  if (seconds < 60) return t('agoSeconds', { n: seconds });
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 60) return t('agoMinutes', { n: minutes });
   const hours = Math.floor(minutes / 60);
-  return `${hours} hr ago`;
+  return t('agoHours', { n: hours });
 }
 
 /**

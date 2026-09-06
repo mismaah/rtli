@@ -5,13 +5,17 @@ import { formatDistance, type LatLng } from '@/lib/geo';
 import { formatClock, formatDuration } from '@/lib/time';
 import { journeyFraction, stopsRemaining, type JourneyStep } from '@/lib/transit/journey';
 import { totalDistanceM } from '@/lib/transit/plan';
-import { usePrefs } from '@/store/prefs';
+import { formatEta } from '@/lib/transit/parseEta';
+import { stopCount } from '@/components/LegTimeline';
+import { Dv, placeText, stopSecondary, stopText, useT } from '@/i18n';
+import type { Language, T } from '@/i18n';
 import type { BoardedBus } from '@/hooks/useBoardedBus';
 import type { Journey } from '@/hooks/useJourney';
-import type { Itinerary, Stop } from '@/lib/transit/types';
+import type { Itinerary, Stop, TransitGraph } from '@/lib/transit/types';
 
 interface Props {
   itinerary: Itinerary;
+  graph: TransitGraph;
   journey: Journey;
   /** The stops the rider is aboard for on the current ride, board to alight. */
   rideStops: Stop[];
@@ -32,6 +36,7 @@ interface Props {
  */
 export function JourneyNav({
   itinerary,
+  graph,
   journey,
   rideStops,
   position,
@@ -39,6 +44,7 @@ export function JourneyNav({
   onExit,
 }: Props) {
   const now = useNowMinutes();
+  const { t, lang } = useT();
   const { step, steps, index, progress, startedAt, finished } = journey;
   if (!step) return null;
 
@@ -58,11 +64,11 @@ export function JourneyNav({
             className="-ml-2 inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-sm font-medium text-ink-300 active:bg-white/5"
           >
             <CloseIcon />
-            End journey
+            {t('endJourney')}
           </button>
         )}
         <span className="text-xs tabular-nums text-ink-500">
-          Step {index + 1} of {steps.length}
+          {t('stepOfTotal', { n: index + 1, total: steps.length })}
         </span>
       </div>
 
@@ -76,19 +82,24 @@ export function JourneyNav({
       {!finished && (
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs text-ink-500">
           <span className="tabular-nums text-ink-300">
-            Arriving {formatClock(itinerary.arriveAt)}
+            {t('arrivingAt', { time: formatClock(itinerary.arriveAt) })}
           </span>
           <span className="tabular-nums">
-            {minutesLeft === 0 ? 'any moment' : `${formatDuration(minutesLeft)} to go`}
+            {minutesLeft === 0
+              ? t('anyMoment')
+              : t('timeToGo', { duration: formatDuration(minutesLeft, t) })}
           </span>
           {elapsed != null && elapsed > 0 && (
-            <span className="tabular-nums">{formatDuration(elapsed)} in</span>
+            <span className="tabular-nums">
+              {t('timeElapsed', { duration: formatDuration(elapsed, t) })}
+            </span>
           )}
         </div>
       )}
 
       <Instruction
         step={step}
+        graph={graph}
         progress={progress}
         rideStops={rideStops}
         position={position}
@@ -101,8 +112,8 @@ export function JourneyNav({
 
       {next && (
         <p className="text-xs text-ink-500">
-          <span className="uppercase tracking-wide text-ink-500">Then</span>{' '}
-          <span className="text-ink-300">{summarise(next)}</span>
+          <span className="uppercase tracking-wide text-ink-500">{t('then')}</span>{' '}
+          <span className="text-ink-300">{summarise(next, t, lang, graph)}</span>
         </p>
       )}
 
@@ -125,6 +136,7 @@ export function JourneyActionBar({
   journey: Journey;
   onExit: () => void;
 }) {
+  const { t } = useT();
   const { step, index, finished } = journey;
   if (!step) return null;
 
@@ -135,7 +147,7 @@ export function JourneyActionBar({
         onClick={finished ? onExit : journey.advance}
         className="min-h-14 w-full rounded-2xl bg-brand-500 px-6 text-base font-semibold text-white shadow-lg shadow-brand-500/20 active:bg-brand-400"
       >
-        {actionLabel(step)}
+        {t(actionLabelKey(step))}
       </button>
       {index > 0 && (
         <button
@@ -143,7 +155,7 @@ export function JourneyActionBar({
           onClick={journey.rewind}
           className="min-h-11 w-full rounded-xl text-xs font-medium text-ink-500 active:bg-white/5"
         >
-          Went too far? Back a step
+          {t('wentTooFar')}
         </button>
       )}
     </div>
@@ -152,6 +164,7 @@ export function JourneyActionBar({
 
 function Instruction({
   step,
+  graph,
   progress,
   rideStops,
   position,
@@ -162,6 +175,7 @@ function Instruction({
   liveApplied,
 }: {
   step: JourneyStep;
+  graph: TransitGraph;
   progress: Journey['progress'];
   rideStops: Stop[];
   position: LatLng | null;
@@ -171,11 +185,12 @@ function Instruction({
   elapsed: number | null;
   liveApplied: boolean;
 }) {
-  const showDhivehi = usePrefs((s) => s.showDhivehi);
+  const { t, lang } = useT();
+  const name = targetName(step, lang, graph, t);
   const away =
     progress.metersToTarget == null || progress.atTarget
       ? null
-      : `${formatDistance(progress.metersToTarget)} away`;
+      : t('distanceAway', { dist: formatDistance(progress.metersToTarget, t) });
 
   if (step.kind === 'arrive') {
     return (
@@ -183,15 +198,21 @@ function Instruction({
         <div className="mx-auto grid size-12 place-items-center rounded-full bg-live-500/20">
           <TickIcon />
         </div>
-        <h2 className="mt-3 text-xl font-semibold text-ink-100">
-          You have reached your destination
-        </h2>
-        <p className="mt-1 text-sm text-ink-300">{step.targetName}</p>
+        <h2 className="mt-3 text-xl font-semibold text-ink-100">{t('reachedDestination')}</h2>
+        <p className="mt-1 text-sm text-ink-300">{name}</p>
         <div className="mt-4 flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs text-ink-500">
-          {elapsed != null && elapsed > 0 && <span>Took {formatDuration(elapsed)}</span>}
-          <span>{formatDistance(totalDistanceM(itinerary))} travelled</span>
-          <span>{formatDistance(itinerary.totalWalkM)} walked</span>
-          {itinerary.totalFare > 0 && <span>MVR {itinerary.totalFare.toFixed(2)} fare</span>}
+          {elapsed != null && elapsed > 0 && (
+            <span>{t('tookDuration', { duration: formatDuration(elapsed, t) })}</span>
+          )}
+          <span>
+            {t('distanceTravelled', { dist: formatDistance(totalDistanceM(itinerary), t) })}
+          </span>
+          <span>{t('distanceWalked', { dist: formatDistance(itinerary.totalWalkM, t) })}</span>
+          {itinerary.totalFare > 0 && (
+            <span>
+              {t('fareTotal', { fare: t('fare', { amount: itinerary.totalFare.toFixed(2) }) })}
+            </span>
+          )}
         </div>
       </section>
     );
@@ -201,17 +222,22 @@ function Instruction({
     const walk = step.walk;
     return (
       <section className="rounded-2xl border border-white/10 bg-ink-800/70 p-4">
-        <Eyebrow icon={<WalkIcon />} text="Walk" />
+        <Eyebrow icon={<WalkIcon />} text={t('eyebrowWalk')} />
         <h2 className="mt-2 text-xl font-semibold leading-tight text-ink-100">
-          Walk to {step.targetName}
+          {t('walkTo', { name })}
         </h2>
         <p className="mt-1 text-sm text-ink-300">
-          {walk ? `${formatDistance(walk.meters)} · about ${formatDuration(walk.seconds / 60)}` : ''}
+          {walk
+            ? t('distanceAbout', {
+                dist: formatDistance(walk.meters, t),
+                duration: formatDuration(walk.seconds / 60, t),
+              })
+            : ''}
         </p>
-        <Distance away={away} atTarget={progress.atTarget} known={position !== null} />
+        <Distance away={away} atTarget={progress.atTarget} known={position !== null} t={t} />
         {progress.atTarget && (
           <p className="mt-3 rounded-lg bg-live-500/10 px-3 py-2 text-xs text-live-500">
-            You're there. Moving you on…
+            {t('youreThere')}
           </p>
         )}
       </section>
@@ -225,26 +251,28 @@ function Instruction({
     const live = bus.liveEta;
     return (
       <section className="rounded-2xl border border-white/10 bg-ink-800/70 p-4">
-        <Eyebrow icon={<StopIcon />} text="At the stop" />
+        <Eyebrow icon={<StopIcon />} text={t('eyebrowAtStop')} />
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <RouteChip route={bus.route} />
           <h2 className="text-xl font-semibold leading-tight text-ink-100">
-            Wait for {bus.route.routeNumber}
+            {t('waitForRoute', { route: bus.route.routeNumber })}
           </h2>
         </div>
         <p className="mt-1 text-sm text-ink-300">
-          at {step.targetName}
-          {showDhivehi && bus.boardStop.dvName ? (
-            <span className="dv block text-xs text-ink-300">{bus.boardStop.dvName}</span>
+          {t('atStop', { name })}
+          {stopSecondary(bus.boardStop, lang) ? (
+            <Dv className="block text-xs text-ink-300">{stopSecondary(bus.boardStop, lang)}</Dv>
           ) : null}
         </p>
 
         <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-500">
           <span className="tabular-nums">
-            {bus.estimated && !live ? 'Around' : 'Departs'} {formatClock(bus.departAt)}
+            {t(bus.estimated && !live ? 'aroundTime' : 'departsTime', {
+              time: formatClock(bus.departAt),
+            })}
           </span>
-          <span>MVR {bus.fare.toFixed(2)}</span>
-          <span>Get off at {bus.alightStop.name}</span>
+          <span>{t('fare', { amount: bus.fare.toFixed(2) })}</span>
+          <span>{t('getOffAt', { name: stopText(bus.alightStop, lang) })}</span>
         </div>
 
         {live ? (
@@ -256,17 +284,15 @@ function Instruction({
             }`}
           >
             <span className="mr-1.5 inline-block size-1.5 animate-pulse rounded-full bg-live-500 align-middle" />
-            {live.minutes === 0 ? 'Your bus is pulling in — board it' : live.label}
-            {live.vehicleCode ? ` · bus ${live.vehicleCode}` : ''}
+            {live.minutes === 0 ? t('busPullingIn') : formatEta(live, t)}
+            {live.vehicleCode ? ` · ${t('busNumbered', { code: live.vehicleCode })}` : ''}
           </p>
         ) : (
           <p className="mt-3 text-xs text-ink-500">
-            {liveApplied
-              ? 'No live position for this bus — go by the timetable.'
-              : 'Checking for live bus times…'}
+            {liveApplied ? t('noLivePosition') : t('checkingLive')}
           </p>
         )}
-        <Distance away={away} atTarget={progress.atTarget} known={position !== null} />
+        <Distance away={away} atTarget={progress.atTarget} known={position !== null} t={t} />
       </section>
     );
   }
@@ -286,58 +312,57 @@ function Instruction({
             : 'border-white/10 bg-ink-800/70'
       }`}
     >
-      <Eyebrow icon={<BusIcon />} text={`On the ${bus.route.routeNumber}`} />
+      <Eyebrow icon={<BusIcon />} text={t('eyebrowOnRoute', { route: bus.route.routeNumber })} />
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <RouteChip route={bus.route} />
         <h2 className="text-xl font-semibold leading-tight text-ink-100">
-          Ride to {step.targetName}
+          {t('rideTo', { name })}
         </h2>
       </div>
-      {showDhivehi && bus.alightStop.dvName ? (
-        <p className="dv mt-1 text-xs text-ink-300">{bus.alightStop.dvName}</p>
+      {stopSecondary(bus.alightStop, lang) ? (
+        <Dv className="mt-1 block text-xs text-ink-300">{stopSecondary(bus.alightStop, lang)}</Dv>
       ) : null}
 
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-500">
-        <span>
-          {bus.numStops} stop{bus.numStops > 1 ? 's' : ''}
-        </span>
-        <span>{formatDuration(bus.arriveAt - bus.departAt)}</span>
+        <span>{stopCount(bus.numStops, t)}</span>
+        <span>{formatDuration(bus.arriveAt - bus.departAt, t)}</span>
         <span className="tabular-nums">
-          {bus.estimated ? 'Around' : 'Arrives'} {formatClock(bus.arriveAt)}
+          {t(bus.estimated ? 'aroundTime' : 'arrivesTime', { time: formatClock(bus.arriveAt) })}
         </span>
       </div>
 
       {progress.atTarget ? (
         <p className="mt-3 rounded-lg bg-live-500/15 px-3 py-2 text-sm font-semibold text-live-500">
-          {step.targetName} — get off here
+          {t('getOffHere', { name })}
         </p>
       ) : progress.approaching ? (
         <p className="mt-3 rounded-lg bg-amber-500/15 px-3 py-2 text-sm font-semibold text-amber-200">
-          Get off at the next stop — {step.targetName} is{' '}
-          {formatDistance(progress.metersToTarget ?? 0)} ahead
+          {t('approachingAlight', {
+            name,
+            dist: formatDistance(progress.metersToTarget ?? 0, t),
+          })}
         </p>
       ) : remaining != null ? (
         <p className="mt-3 text-sm font-medium text-ink-100">
           {remaining === 0
-            ? 'Getting off here'
-            : `${remaining} stop${remaining > 1 ? 's' : ''} to go`}
+            ? t('gettingOffHere')
+            : t(remaining > 1 ? 'stopsToGoMany' : 'stopsToGoOne', { n: remaining })}
         </p>
       ) : (
         <p className="mt-3 text-xs text-ink-500">
-          Nothing reliable to track this bus by, so count the stops yourself and tap below
-          when you get off.
+          {t('untrackableBus')}
         </p>
       )}
 
       {vehicle && (
         <p className="mt-2 inline-flex items-center gap-1.5 text-xs text-live-500">
           <span className="inline-block size-1.5 animate-pulse rounded-full bg-live-500" />
-          Following bus {vehicle.plateNumber || vehicle.busCode}
+          {t('followingBus', { code: vehicle.plateNumber || vehicle.busCode })}
         </p>
       )}
 
       {rideStops.length > 1 && remaining != null && (
-        <RemainingStops stops={rideStops} remaining={remaining} />
+        <RemainingStops stops={rideStops} remaining={remaining} lang={lang} t={t} />
       )}
     </section>
   );
@@ -348,7 +373,17 @@ function Instruction({
  * than trusting a number. Stops already passed stay listed but fade, which is
  * what tells you at a glance how much of the ride is behind you.
  */
-function RemainingStops({ stops, remaining }: { stops: Stop[]; remaining: number }) {
+function RemainingStops({
+  stops,
+  remaining,
+  lang,
+  t,
+}: {
+  stops: Stop[];
+  remaining: number;
+  lang: Language;
+  t: T;
+}) {
   const passed = stops.length - 1 - remaining;
   return (
     <ol className="mt-3 max-h-40 space-y-1.5 overflow-y-auto pr-1 text-xs">
@@ -371,11 +406,11 @@ function RemainingStops({ stops, remaining }: { stops: Stop[]; remaining: number
                     : 'text-ink-300'
               }`}
             >
-              {stop.name}
+              {stopText(stop, lang)}
             </span>
             {i === passed && !isLast && (
               <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-ink-500">
-                you are here
+                {t('youAreHere')}
               </span>
             )}
           </li>
@@ -389,17 +424,15 @@ function Distance({
   away,
   atTarget,
   known,
+  t,
 }: {
   away: string | null;
   atTarget: boolean;
   known: boolean;
+  t: T;
 }) {
   if (!known) {
-    return (
-      <p className="mt-3 text-xs text-ink-500">
-        Location off, so tap the button below when you get there.
-      </p>
-    );
+    return <p className="mt-3 text-xs text-ink-500">{t('locationOff')}</p>;
   }
   if (!away || atTarget) return null;
   return <p className="mt-3 text-sm font-medium tabular-nums text-ink-100">{away}</p>;
@@ -414,30 +447,50 @@ function Eyebrow({ icon, text }: { icon: ReactNode; text: string }) {
   );
 }
 
+/**
+ * A step's target as the rider reads it.
+ *
+ * `JourneyStep.targetName` is fixed English, taken from the `Place` a walk ends
+ * at — but where the target is a bus stop the stop itself is on the step, and
+ * that does carry a Dhivehi name. Walks to an address stay as they were: RTL
+ * names stops, not the addresses people search for.
+ */
+function targetName(step: JourneyStep, lang: Language, graph: TransitGraph, t: T): string {
+  if (step.bus) {
+    return step.kind === 'wait'
+      ? stopText(step.bus.boardStop, lang)
+      : stopText(step.bus.alightStop, lang);
+  }
+  // A walk ends at a `Place`, which carries no Dhivehi name — but most of them
+  // are bus stops, and a stop can be looked back up by its code.
+  return step.walk ? placeText(step.walk.to, lang, graph, t) : step.targetName;
+}
+
 /** One line of what the rider will be doing next. */
-function summarise(step: JourneyStep): string {
+function summarise(step: JourneyStep, t: T, lang: Language, graph: TransitGraph): string {
+  const name = targetName(step, lang, graph, t);
   switch (step.kind) {
     case 'walk':
-      return `walk to ${step.targetName}`;
+      return t('summaryWalk', { name });
     case 'wait':
-      return `wait for ${step.bus?.route.routeNumber} at ${step.targetName}`;
+      return t('summaryWait', { route: step.bus?.route.routeNumber ?? '', name });
     case 'ride':
-      return `ride ${step.bus?.route.routeNumber} to ${step.targetName}`;
+      return t('summaryRide', { route: step.bus?.route.routeNumber ?? '', name });
     default:
-      return 'arrive at your destination';
+      return t('summaryArrive');
   }
 }
 
-function actionLabel(step: JourneyStep): string {
+function actionLabelKey(step: JourneyStep) {
   switch (step.kind) {
     case 'walk':
-      return "I'm here";
+      return 'actionImHere' as const;
     case 'wait':
-      return "I've boarded";
+      return 'actionBoarded' as const;
     case 'ride':
-      return "I've got off";
+      return 'actionGotOff' as const;
     default:
-      return 'Done';
+      return 'actionDone' as const;
   }
 }
 

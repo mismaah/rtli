@@ -1,9 +1,12 @@
 import { ItineraryCard } from '@/components/ItineraryCard';
 import { usePrefs } from '@/store/prefs';
+import { Dv, placeSecondary, placeText, useT } from '@/i18n';
+import type { T } from '@/i18n';
 import type { WalkPreference } from '@/lib/transit/plan';
-import type { Itinerary, Place } from '@/lib/transit/types';
+import type { Itinerary, Place, TransitGraph } from '@/lib/transit/types';
 
 interface Props {
+  graph: TransitGraph;
   origin: Place;
   destination: Place;
   itineraries: Itinerary[];
@@ -16,6 +19,7 @@ interface Props {
 }
 
 export function Results({
+  graph,
   origin,
   destination,
   itineraries,
@@ -28,14 +32,22 @@ export function Results({
 }: Props) {
   const walkPreference = usePrefs((s) => s.walkPreference);
   const setWalkPreference = usePrefs((s) => s.setWalkPreference);
+  const { t, lang } = useT();
 
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-white/10 bg-ink-800/70 p-1">
-        <Endpoint label="From" value={origin.name} onClick={onEditOrigin} dot="#3b82f6" />
         <Endpoint
-          label="To"
-          value={destination.name}
+          label={t('fieldFrom')}
+          value={placeText(origin, lang, graph, t)}
+          dv={placeSecondary(origin, lang, graph)}
+          onClick={onEditOrigin}
+          dot="#3b82f6"
+        />
+        <Endpoint
+          label={t('fieldTo')}
+          value={placeText(destination, lang, graph, t)}
+          dv={placeSecondary(destination, lang, graph)}
           onClick={onEditDestination}
           dot="#ef4444"
           action={
@@ -45,7 +57,7 @@ export function Results({
                 e.stopPropagation();
                 onToggleSaveDestination();
               }}
-              aria-label={destinationSaved ? 'Remove from saved places' : 'Save this place'}
+              aria-label={destinationSaved ? t('removeFromSaved') : t('saveThisPlace')}
               className="grid size-10 shrink-0 place-items-center rounded-full text-ink-500 active:bg-white/10"
             >
               <StarIcon filled={destinationSaved} />
@@ -55,18 +67,15 @@ export function Results({
       </div>
 
       {itineraries.length > 0 && (
-        <WalkPreferencePicker value={walkPreference} onChange={setWalkPreference} />
+        <WalkPreferencePicker value={walkPreference} onChange={setWalkPreference} t={t} />
       )}
 
       {loading && <SkeletonList />}
 
       {!loading && itineraries.length === 0 && (
         <div className="rounded-2xl border border-white/10 bg-ink-800/50 p-6 text-center">
-          <p className="text-sm text-ink-300">No bus route found for this trip.</p>
-          <p className="mt-2 text-xs text-ink-500">
-            RTL buses cover Malé, Hulhulé and Hulhumalé, plus Villimalé internally. Villimalé is
-            reached by ferry, not by bus, so trips between it and Malé cannot be planned here.
-          </p>
+          <p className="text-sm text-ink-300">{t('noRouteFound')}</p>
+          <p className="mt-2 text-xs text-ink-500">{t('noRouteHint')}</p>
         </div>
       )}
 
@@ -83,23 +92,25 @@ export function Results({
  * the question at noon with shopping — so it sits with the results it reorders
  * rather than behind a settings screen.
  */
-const WALK_OPTIONS: { value: WalkPreference; label: string; hint: string }[] = [
-  { value: 'less', label: 'Less walking', hint: 'Favours trips with the shortest walk' },
-  { value: 'balanced', label: 'Balanced', hint: 'Trades walking against time and fare' },
-  { value: 'more', label: 'Fastest', hint: 'Walk further if it gets you there sooner' },
-];
+const WALK_OPTIONS = [
+  { value: 'less', label: 'walkLess', hint: 'walkLessHint' },
+  { value: 'balanced', label: 'walkBalanced', hint: 'walkBalancedHint' },
+  { value: 'more', label: 'walkMore', hint: 'walkMoreHint' },
+] as const;
 
 function WalkPreferencePicker({
   value,
   onChange,
+  t,
 }: {
   value: WalkPreference;
   onChange: (next: WalkPreference) => void;
+  t: T;
 }) {
   return (
     <div
       role="radiogroup"
-      aria-label="Walking preference"
+      aria-label={t('walkPreference')}
       className="flex gap-1 rounded-full border border-white/10 bg-ink-800/70 p-1"
     >
       {WALK_OPTIONS.map((option) => {
@@ -110,13 +121,13 @@ function WalkPreferencePicker({
             type="button"
             role="radio"
             aria-checked={selected}
-            title={option.hint}
+            title={t(option.hint)}
             onClick={() => onChange(option.value)}
             className={`min-h-9 flex-1 rounded-full px-3 text-xs font-medium transition-colors ${
               selected ? 'bg-brand-500/20 text-brand-400' : 'text-ink-500 active:bg-white/5'
             }`}
           >
-            {option.label}
+            {t(option.label)}
           </button>
         );
       })}
@@ -127,12 +138,14 @@ function WalkPreferencePicker({
 function Endpoint({
   label,
   value,
+  dv,
   onClick,
   dot,
   action,
 }: {
   label: string;
   value: string;
+  dv?: string;
   onClick: () => void;
   dot: string;
   action?: React.ReactNode;
@@ -148,6 +161,7 @@ function Endpoint({
         <span className="min-w-0 flex-1">
           <span className="block text-[10px] uppercase tracking-wide text-ink-500">{label}</span>
           <span className="block truncate text-sm text-ink-100">{value}</span>
+          {dv ? <Dv className="block truncate text-xs text-ink-300">{dv}</Dv> : null}
         </span>
       </button>
       {action}
