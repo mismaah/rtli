@@ -324,3 +324,72 @@ describe('nextRecheckDelay', () => {
     expect(nextRecheckDelay(undefined, 0, true)).toBe(false);
   });
 });
+
+/**
+ * Confirming an offline claim before repeating it.
+ *
+ * `navigator.onLine` came back false on a machine whose every request was
+ * answering 200 — the backend in 268 ms and RTL alongside it — which pinned the
+ * offline banner over a working session. The flag is a suspicion now, and this
+ * is what settles it.
+ */
+describe('reachable', () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    vi.useRealTimers();
+  });
+
+  it('says yes when the probe is answered', async () => {
+    const { reachable } = await import('@/hooks/useOnline');
+    globalThis.fetch = vi.fn(async () => new Response('', { status: 200 })) as typeof fetch;
+    expect(await reachable()).toBe(true);
+  });
+
+  it('says no when the probe cannot be made', async () => {
+    const { reachable } = await import('@/hooks/useOnline');
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    }) as typeof fetch;
+    expect(await reachable()).toBe(false);
+  });
+
+  it('says no when the probe is answered with an error', async () => {
+    const { reachable } = await import('@/hooks/useOnline');
+    globalThis.fetch = vi.fn(async () => new Response('', { status: 503 })) as typeof fetch;
+    expect(await reachable()).toBe(false);
+  });
+
+  it('defeats the service worker precache, which would answer with no network', async () => {
+    const { reachable } = await import('@/hooks/useOnline');
+    const seen: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(String(input));
+      expect(init?.cache).toBe('no-store');
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+
+    await reachable();
+    // Precache routes match on the exact URL, so the query string is what sends
+    // this to the network instead of to disk.
+    expect(seen[0]).toContain('?online-probe=');
+  });
+
+  it('gives up rather than hanging on a connection that never answers', async () => {
+    const { reachable } = await import('@/hooks/useOnline');
+    vi.useFakeTimers();
+    globalThis.fetch = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const fail = () => reject(new DOMException('Aborted', 'AbortError'));
+          if (init?.signal?.aborted) fail();
+          else init?.signal?.addEventListener('abort', fail, { once: true });
+        }),
+    ) as typeof fetch;
+
+    const pending = reachable();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await pending).toBe(false);
+  });
+});
