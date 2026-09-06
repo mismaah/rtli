@@ -19,6 +19,9 @@
   /* Notch and home-indicator insets, used by the sheets and bars. */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* The app's Latin face, named once so every stack that has to fall back to it
+     — including the Dhivehi one — falls back to the same thing. */
+  --font-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 }
 
 html,
@@ -34,8 +37,7 @@ body {
   /* Thaana leads the stack, but its @font-face declares a `unicode-range`, so it
      is only ever consulted for Thaana codepoints — Latin still renders in the
      system UI face, in every language mode. */
-  font-family: 'MV Faseyha', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
-    sans-serif;
+  font-family: 'MV Faseyha', var(--font-ui);
   /* Kill the 300ms tap delay and iOS double-tap zoom. */
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
@@ -78,24 +80,30 @@ body {
 .dv {
   direction: rtl;
   unicode-bidi: isolate;
-  /* The run turns around; the box does not. These are subtitles under an English
-     line in the bilingual mode, and `direction: rtl` alone pins them to the far
-     right of whatever they sit in — which in a full-width row leaves the Dhivehi
-     name stranded across the sheet from the English name it belongs to. */
-  text-align: left;
-  font-family: 'MV Faseyha', 'A_Faruma', 'Faruma', sans-serif;
+  /* The run turns around; the box keeps whatever alignment its page has. These
+     are subtitles under an English line in the bilingual mode, and `direction:
+     rtl` alone pins them to the far right of whatever they sit in — which in a
+     full-width row leaves the Dhivehi name stranded across the sheet from the
+     English name it belongs to. */
+  text-align: start;
+  /* Ends in the app's own Latin stack rather than a bare `sans-serif`. Dhivehi
+     runs carry Latin too — a stop named in both scripts, "English + ދިވެހި" on
+     the language button — and bare `sans-serif` resolved that Latin to something
+     other than the face the same word is set in one row below it. */
+  font-family: 'MV Faseyha', 'A_Faruma', 'Faruma', var(--font-ui);
 }
 
-/* Full Dhivehi mode.
-   The layout is deliberately not mirrored — the sheet, the back arrows and the
-   timeline rail stay exactly where an English reader left them. Only the text
-   turns around, and it does so per run: `plaintext` takes each element's
-   direction from its own first strong character, so a Dhivehi sentence reads
-   right-to-left while a stop RTL only names in English ("Raalhugandu") keeps
-   reading left-to-right beside it. `.dv` is left alone — it already states its
-   direction outright, which is stronger than a guess. */
-[data-ui-lang='dv'] :is(h1, h2, h3, p, li, span, button, label, input):not(.dv) {
-  unicode-bidi: plaintext;
+/* Numbers and Latin, held the way they are written.
+
+   A clock range or a list of route codes is a sequence of left-to-right runs
+   with only weak characters between them, so in a right-to-left paragraph the
+   bidi algorithm is free to reorder it — and "16:23 – 17:08" comes out as
+   "17:08 – 16:23", which is not a smaller mistake for being a plausible one.
+   `isolate` makes each of these its own paragraph, whichever way the page runs. */
+[dir='rtl'] .ltr-run {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: start;
 }
 
 .no-scrollbar::-webkit-scrollbar {

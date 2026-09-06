@@ -22,11 +22,11 @@ export function ItineraryCard({ itinerary, onSelect }: Props) {
     <button
       type="button"
       onClick={onSelect}
-      className="w-full rounded-2xl border border-white/10 bg-ink-800/70 p-4 text-left transition-colors active:bg-ink-700/70"
+      className="w-full rounded-2xl border border-white/10 bg-ink-800/70 p-4 text-start transition-colors active:bg-ink-700/70"
     >
       <div className="flex items-baseline justify-between gap-3">
         <div className="text-2xl font-semibold tabular-nums">{formatDuration(duration, t)}</div>
-        <div className="text-sm tabular-nums text-ink-300">
+        <div className="ltr-run text-sm tabular-nums text-ink-300">
           {formatClock(itinerary.departAt)} – {formatClock(itinerary.arriveAt)}
         </div>
       </div>
@@ -34,7 +34,11 @@ export function ItineraryCard({ itinerary, onSelect }: Props) {
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         {itinerary.legs.map((leg, i) => (
           <Fragment key={i}>
-            {i > 0 && <span aria-hidden className="text-ink-500">›</span>}
+            {i > 0 && (
+              <span aria-hidden className="text-ink-500 rtl:-scale-x-100">
+                ›
+              </span>
+            )}
             {leg.kind === 'bus' ? (
               <RouteChip route={leg.route} size="sm" />
             ) : (

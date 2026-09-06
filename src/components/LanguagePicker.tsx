@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { usePrefs } from '@/store/prefs';
-import { Dv, useT } from '@/i18n';
+import { useT } from '@/i18n';
 import type { CatalogKey, Language } from '@/i18n';
 
 /**
@@ -14,10 +14,10 @@ import type { CatalogKey, Language } from '@/i18n';
  * Each option is written in its own language, so the way out of a mode you
  * cannot read is always legible.
  */
-const OPTIONS: { value: Language; key: CatalogKey; thaana: boolean }[] = [
-  { value: 'both', key: 'languageBoth', thaana: true },
-  { value: 'en', key: 'languageEn', thaana: false },
-  { value: 'dv', key: 'languageDv', thaana: true },
+const OPTIONS: { value: Language; key: CatalogKey }[] = [
+  { value: 'both', key: 'languageBoth' },
+  { value: 'en', key: 'languageEn' },
+  { value: 'dv', key: 'languageDv' },
 ];
 
 /** Two characters of the current mode, for the closed button. */
@@ -64,7 +64,7 @@ export function LanguagePicker() {
         <div
           role="radiogroup"
           aria-label={t('languageLabel')}
-          className="absolute right-0 top-full z-20 mt-1.5 w-44 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 shadow-lg backdrop-blur"
+          className="absolute end-0 top-full z-20 mt-1.5 w-44 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 shadow-lg backdrop-blur"
         >
           {OPTIONS.map((option) => {
             const selected = option.value === language;
@@ -78,16 +78,17 @@ export function LanguagePicker() {
                   setLanguage(option.value);
                   setOpen(false);
                 }}
-                className={`flex min-h-11 w-full items-center gap-2 border-b border-white/5 px-3 text-left text-sm last:border-0 ${
+                className={`flex min-h-11 w-full items-center gap-2 border-b border-white/5 px-3 text-start text-sm last:border-0 ${
                   selected ? 'bg-brand-500/15 text-brand-400' : 'text-ink-300 active:bg-white/5'
                 }`}
               >
                 <span className="w-4 shrink-0 text-center text-xs">{selected ? '✓' : ''}</span>
-                {option.thaana ? (
-                  <Dv className="min-w-0 flex-1">{t(option.key)}</Dv>
-                ) : (
-                  <span className="min-w-0 flex-1">{t(option.key)}</span>
-                )}
+                {/* Deliberately not a `Dv`: these labels are the one place the
+                    two scripts share a line, and forcing the whole run
+                    right-to-left printed "English + ދިވެހި" backwards. Left as
+                    written, the body stack still resolves the Thaana to MV
+                    Faseyha and the Latin to the UI face, per character. */}
+                <span className="min-w-0 flex-1">{t(option.key)}</span>
               </button>
             );
           })}

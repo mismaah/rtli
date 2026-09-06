@@ -22,9 +22,9 @@ export function TripDetail({ itinerary, graph, liveApplied, onBack }: Props) {
       <button
         type="button"
         onClick={onBack}
-        className="-ml-2 inline-flex min-h-11 items-center gap-1 rounded-lg px-2 text-sm font-medium text-brand-400 active:bg-white/5"
+        className="-ms-2 inline-flex min-h-11 items-center gap-1 rounded-lg px-2 text-sm font-medium text-brand-400 active:bg-white/5"
       >
-        <svg viewBox="0 0 24 24" className="size-5 fill-current" aria-hidden>
+        <svg viewBox="0 0 24 24" className="size-5 fill-current rtl:-scale-x-100" aria-hidden>
           <path d="M15.5 4.5 14 3l-9 9 9 9 1.5-1.5L8 12z" />
         </svg>
         {t('allOptions')}
@@ -35,7 +35,7 @@ export function TripDetail({ itinerary, graph, liveApplied, onBack }: Props) {
           <span className="text-2xl font-semibold tabular-nums">
             {formatDuration(itinerary.arriveAt - itinerary.departAt, t)}
           </span>
-          <span className="text-sm tabular-nums text-ink-300">
+          <span className="ltr-run text-sm tabular-nums text-ink-300">
             {formatClock(itinerary.departAt)} – {formatClock(itinerary.arriveAt)}
           </span>
         </div>

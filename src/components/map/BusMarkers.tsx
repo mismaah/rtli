@@ -317,7 +317,7 @@ function BusInfo({ track, route, updatedAt }: { track: BusTrack; route: Route; u
 
   return (
     <div className="w-[228px] p-3.5 text-ink-100">
-      <div className="flex items-center gap-2 pr-5">
+      <div className="flex items-center gap-2 pe-5">
         <span
           className="inline-flex items-center rounded-lg px-2 py-1 text-xs font-bold leading-none"
           style={{ background: route.color, color: readableOn(route.color) }}
@@ -329,7 +329,7 @@ function BusInfo({ track, route, updatedAt }: { track: BusTrack; route: Route; u
 
       <p className="mt-2 text-sm font-semibold">
         {track.plateNumber || t('unmarkedBus')}
-        <span className="ml-1.5 text-[11px] font-normal text-ink-500">{track.busCode}</span>
+        <span className="ms-1.5 text-[11px] font-normal text-ink-500">{track.busCode}</span>
       </p>
 
       <p className="mt-2.5 flex items-center gap-1.5 border-t border-white/10 pt-2.5 text-xs">

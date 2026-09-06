@@ -56,11 +56,18 @@ export default function App() {
   const wide = useWideLayout();
   const { t, lang } = useT();
 
-  // Drives screen-reader voice selection and text segmentation. The layout stays
-  // left-to-right in every mode — only the Thaana runs themselves are RTL — so
-  // `dir` deliberately does not move with it.
+  // Full Dhivehi turns the document around.
+  //
+  // Setting the direction per run was not enough: a sentence that opens with a
+  // stop RTL never translated ("MACL Flat Stop އަށް ހިނގާފައި ދާން") takes its
+  // base direction from that first Latin word and lays the Dhivehi out backwards
+  // after it. Only a right-to-left paragraph orders the two scripts the way a
+  // Dhivehi reader reads them, and once the paragraphs turn, the chrome around
+  // them has to turn with them — which the logical properties throughout the
+  // components do on their own.
   useEffect(() => {
     document.documentElement.lang = lang === 'dv' ? 'dv' : 'en';
+    document.documentElement.dir = lang === 'dv' ? 'rtl' : 'ltr';
     document.documentElement.dataset.uiLang = lang;
   }, [lang]);
 
@@ -445,7 +452,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setFollowing(true)}
-            className="absolute right-4 z-10 inline-flex min-h-11 items-center gap-1.5 rounded-full bg-ink-900/90 px-4 text-sm font-medium text-brand-400 shadow-lg backdrop-blur active:bg-ink-800"
+            className="absolute end-4 z-10 inline-flex min-h-11 items-center gap-1.5 rounded-full bg-ink-900/90 px-4 text-sm font-medium text-brand-400 shadow-lg backdrop-blur active:bg-ink-800"
             style={{ bottom: sheetHeightPx + 12 }}
           >
             <LocateIcon />

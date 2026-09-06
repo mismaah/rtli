@@ -72,7 +72,7 @@ export function BottomSheet({ snap, onSnapChange, header, footer, children }: Bo
   if (wide) {
     return (
       <aside
-        className="pointer-events-auto z-20 flex h-full shrink-0 flex-col border-l border-white/10 bg-ink-900"
+        className="pointer-events-auto z-20 flex h-full shrink-0 flex-col border-s border-white/10 bg-ink-900"
         style={{ width: SIDE_PANEL_WIDTH, paddingTop: 'var(--safe-top)' }}
       >
         {header ? <div className="shrink-0 px-4 pt-4">{header}</div> : null}

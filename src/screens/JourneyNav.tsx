@@ -61,7 +61,7 @@ export function JourneyNav({
           <button
             type="button"
             onClick={onExit}
-            className="-ml-2 inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-sm font-medium text-ink-300 active:bg-white/5"
+            className="-ms-2 inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-sm font-medium text-ink-300 active:bg-white/5"
           >
             <CloseIcon />
             {t('endJourney')}
@@ -283,7 +283,7 @@ function Instruction({
                 : 'bg-white/5 text-live-500'
             }`}
           >
-            <span className="mr-1.5 inline-block size-1.5 animate-pulse rounded-full bg-live-500 align-middle" />
+            <span className="me-1.5 inline-block size-1.5 animate-pulse rounded-full bg-live-500 align-middle" />
             {live.minutes === 0 ? t('busPullingIn') : formatEta(live, t)}
             {live.vehicleCode ? ` · ${t('busNumbered', { code: live.vehicleCode })}` : ''}
           </p>
@@ -386,7 +386,7 @@ function RemainingStops({
 }) {
   const passed = stops.length - 1 - remaining;
   return (
-    <ol className="mt-3 max-h-40 space-y-1.5 overflow-y-auto pr-1 text-xs">
+    <ol className="mt-3 max-h-40 space-y-1.5 overflow-y-auto pe-1 text-xs">
       {stops.map((stop, i) => {
         const isLast = i === stops.length - 1;
         const done = i < passed;
@@ -409,7 +409,7 @@ function RemainingStops({
               {stopText(stop, lang)}
             </span>
             {i === passed && !isLast && (
-              <span className="ml-auto shrink-0 text-[10px] uppercase tracking-wide text-ink-500">
+              <span className="ms-auto shrink-0 text-[10px] uppercase tracking-wide text-ink-500">
                 {t('youAreHere')}
               </span>
             )}

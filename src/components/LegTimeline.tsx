@@ -17,7 +17,7 @@ export function LegTimeline({
   const { t, lang } = useT();
 
   return (
-    <ol className="relative space-y-1 pl-1">
+    <ol className="relative space-y-1 ps-1">
       {itinerary.legs.map((leg, i) => (
         <li key={i} className="relative flex gap-3">
           <Rail leg={leg} last={i === itinerary.legs.length - 1} />
@@ -55,7 +55,7 @@ export function LegTimeline({
                     name={stopText(leg.boardStop, lang)}
                     dv={stopSecondary(leg.boardStop, lang)}
                   />
-                  <div className="my-2 flex items-center gap-2 pl-14 text-xs text-ink-500">
+                  <div className="my-2 flex items-center gap-2 ps-14 text-xs text-ink-500">
                     <span className="h-px flex-1 bg-white/10" />
                     {t('legSummary', {
                       stops: stopCount(leg.numStops, t),

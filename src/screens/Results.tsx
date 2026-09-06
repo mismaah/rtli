@@ -155,7 +155,7 @@ function Endpoint({
       <button
         type="button"
         onClick={onClick}
-        className="flex min-h-12 flex-1 items-center gap-3 rounded-xl px-3 py-2 text-left active:bg-white/5"
+        className="flex min-h-12 flex-1 items-center gap-3 rounded-xl px-3 py-2 text-start active:bg-white/5"
       >
         <span className="size-2.5 shrink-0 rounded-full" style={{ background: dot }} />
         <span className="min-w-0 flex-1">

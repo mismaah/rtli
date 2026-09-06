@@ -59,7 +59,7 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
     <div
       className={
         wide
-          ? 'fixed inset-y-0 right-0 z-50 flex flex-col border-l border-white/10 bg-ink-950'
+          ? 'fixed inset-y-0 end-0 z-50 flex flex-col border-s border-white/10 bg-ink-950'
           : 'fixed inset-0 z-50 flex flex-col bg-ink-950'
       }
       style={{ paddingTop: 'var(--safe-top)', width: wide ? SIDE_PANEL_WIDTH : undefined }}
@@ -71,7 +71,7 @@ export function SearchSheet({ graph, userPosition, title, onPick, onClose }: Pro
           aria-label={t('closeSearch')}
           className="grid size-11 shrink-0 place-items-center rounded-full text-ink-300 active:bg-white/10"
         >
-          <svg viewBox="0 0 24 24" className="size-6 fill-current" aria-hidden>
+          <svg viewBox="0 0 24 24" className="size-6 fill-current rtl:-scale-x-100" aria-hidden>
             <path d="M15.5 4.5 14 3l-9 9 9 9 1.5-1.5L8 12z" />
           </svg>
         </button>
@@ -204,7 +204,7 @@ function Row({
     <button
       type="button"
       onClick={onClick}
-      className="flex min-h-14 w-full items-center gap-3 border-b border-white/5 px-3 py-2.5 text-left last:border-0 active:bg-white/5"
+      className="flex min-h-14 w-full items-center gap-3 border-b border-white/5 px-3 py-2.5 text-start last:border-0 active:bg-white/5"
     >
       <span className="grid size-9 shrink-0 place-items-center rounded-full bg-ink-800 text-ink-300">
         {icon}
@@ -212,7 +212,9 @@ function Row({
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm text-ink-100">{title}</span>
         {dv ? <Dv className="block truncate text-xs text-ink-300">{dv}</Dv> : null}
-        {subtitle ? <span className="block truncate text-xs text-ink-500">{subtitle}</span> : null}
+        {subtitle ? (
+          <span className="ltr-run block truncate text-xs text-ink-500">{subtitle}</span>
+        ) : null}
       </span>
     </button>
   );

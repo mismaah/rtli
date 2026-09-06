@@ -44,7 +44,7 @@ export function Home({
           onClick={onEditOrigin}
           dot="#3b82f6"
         />
-        <div className="ml-6 h-4 w-px bg-white/15" />
+        <div className="ms-6 h-4 w-px bg-white/15" />
         <FieldButton
           label={t('fieldTo')}
           value={destination ? placeText(destination, lang, graph, t) : undefined}
@@ -112,7 +112,7 @@ export function Home({
                 key={trip.id}
                 type="button"
                 onClick={() => onPickRecent(trip.origin, trip.destination)}
-                className="flex min-h-14 w-full items-center gap-3 border-b border-white/5 px-3 py-2.5 text-left last:border-0 active:bg-white/5"
+                className="flex min-h-14 w-full items-center gap-3 border-b border-white/5 px-3 py-2.5 text-start last:border-0 active:bg-white/5"
               >
                 <span className="grid size-9 shrink-0 place-items-center rounded-full bg-ink-800 text-ink-500">
                   <ClockIcon />
@@ -153,7 +153,7 @@ function FieldButton({
     <button
       type="button"
       onClick={onClick}
-      className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left active:bg-white/5"
+      className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-start active:bg-white/5"
     >
       <span className="size-3 shrink-0 rounded-full" style={{ background: dot }} />
       <span className="min-w-0 flex-1">
