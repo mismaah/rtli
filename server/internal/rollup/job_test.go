@@ -249,6 +249,90 @@ func alongR1(line *Line, d float64) (lat, lng float64) {
 	return line.ys[len(line.ys)-1] / metersPerDegLat, line.xs[len(line.xs)-1] / line.scale
 }
 
+// loadingRef reproduces the startup race exactly: the poller publishes the route
+// list *before* it fetches the shapes, one per route, so there is a real window
+// where Routes() is complete and RouteGeometry is not.
+type loadingRef struct {
+	stops   []rtl.Stop
+	lines   [][]geo.Point
+	shapeIn bool // whether the geometry has arrived yet
+}
+
+func (l *loadingRef) Routes() []string { return []string{"133"} }
+func (l *loadingRef) RouteGeometry(string) ([][]geo.Point, bool) {
+	if !l.shapeIn {
+		return nil, false
+	}
+	return l.lines, true
+}
+func (l *loadingRef) RouteStops(string) ([]rtl.Stop, bool) { return l.stops, true }
+
+// The job and the poller start in the same breath, so the first sweep can land
+// before there is any geometry to place stops on. Sweeping then would derive
+// nothing, retire every day as finished, and leave the history on whatever it
+// was last derived from — which is the one thing the sweep exists to replace.
+func TestBackfillWaitsForGeometryBeforeRetiringDays(t *testing.T) {
+	line, stops := r1(t)
+	shapeRaw, err := os.ReadFile(fixtureDir + "roadshape-r1.json")
+	if err != nil {
+		t.Fatalf("read roadshape: %v", err)
+	}
+	ref := &loadingRef{stops: stops, lines: geo.Polylines(shapeRaw)}
+
+	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "race.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	now := mustParse(t, "2026-09-06T06:00:00Z")
+	var fixes []store.Fix
+	for day := 1; day <= 3; day++ {
+		start := now.AddDate(0, 0, -day)
+		for d := 0.0; d < line.Length(); d += 100 {
+			lat, lng := alongR1(line, d)
+			fixes = append(fixes, store.Fix{
+				RouteCode: "133", BusCode: "C1",
+				AtMs: start.Add(time.Duration(d/10) * time.Second).UnixMilli(),
+				Lat:  lat, Lng: lng, SnapLat: &lat, SnapLng: &lng,
+			})
+		}
+	}
+	if err := db.InsertFixes(t.Context(), fixes); err != nil {
+		t.Fatalf("InsertFixes: %v", err)
+	}
+
+	job := NewJob(db, ref, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	// The shapes have not landed. Nothing may be derived, and nothing may be
+	// recorded as finished.
+	job.Backfill(t.Context(), now)
+	early, err := db.Stats(t.Context())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if early.Arrivals != 0 {
+		t.Fatalf("derived %d arrivals with no geometry loaded", early.Arrivals)
+	}
+
+	// The poller finishes, and the next pass on the ticker must still sweep.
+	ref.shapeIn = true
+	job.Backfill(t.Context(), now)
+	after, err := db.Stats(t.Context())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if after.Arrivals == 0 {
+		t.Fatal("the sweep never ran once geometry arrived; the backfill was lost " +
+			"to the startup race")
+	}
+
+	// And having run, it does not run again.
+	if !job.swept {
+		t.Error("a completed sweep was not recorded, so it will repeat every pass")
+	}
+}
+
 // emptyRef is a poller that has not finished discovering routes yet.
 type emptyRef struct{}
 

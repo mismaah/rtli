@@ -37,6 +37,20 @@ function backendCaching(apiBase: string) {
       },
     },
     {
+      // Measured headways and ride times. A 28-day median does not go stale in
+      // a day, and the fallback for a miss is not a slightly worse number — it
+      // is back to a flat 15-minute guess for every frequency route. So an
+      // offline client keeps the last measurements it saw for a week.
+      urlPattern: new RegExp(`^${origin}/v1/history`, 'i'),
+      handler: 'NetworkFirst' as const,
+      options: {
+        cacheName: 'api-history',
+        networkTimeoutSeconds: 6,
+        expiration: { maxEntries: 2, maxAgeSeconds: 7 * 24 * 60 * 60 },
+        cacheableResponse: { statuses: [0, 200] },
+      },
+    },
+    {
       // Live data must never be served stale.
       urlPattern: new RegExp(`^${origin}/v1/(live|etas)`, 'i'),
       handler: 'NetworkOnly' as const,

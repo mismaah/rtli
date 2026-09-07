@@ -55,6 +55,10 @@ type Job struct {
 	// Line geometry is fixed for the life of a route and expensive enough to
 	// measure that it is worth keeping between passes.
 	lines map[string]*Line
+
+	// swept records that the one-time backfill has run against a working
+	// reference, so it is retried until it can and then never repeated.
+	swept bool
 }
 
 func NewJob(db *store.DB, ref Reference, log *slog.Logger) *Job {
@@ -71,6 +75,13 @@ const MaxBackfillDays = 90
 // a restart does not leave the aggregates a full interval behind — and so a
 // change to how they are derived reaches the history as well as today.
 func (j *Job) Run(ctx context.Context) {
+	// The poller discovers routes and fetches their geometry over the network,
+	// and main.go starts it in the same breath as this job. Sweeping before that
+	// has settled would derive the routes that happened to be ready, skip the
+	// rest, and retire the day regardless — leaving the skipped routes on
+	// whatever they were derived from last time, which is the very thing the
+	// sweep exists to replace.
+	j.awaitReference(ctx)
 	j.Backfill(ctx, time.Now())
 
 	ticker := time.NewTicker(Interval)
@@ -80,9 +91,57 @@ func (j *Job) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			j.Once(ctx, now)
+			// Backfill rather than Once, because the sweep may still not have
+			// run: a server that started with no network reaches this with
+			// nothing referenced, and this is what retries it. Once the sweep
+			// has happened Backfill is Once plus a bool.
+			j.Backfill(ctx, now)
 		}
 	}
+}
+
+// How long to let the reference settle before the first sweep, and how often to
+// look. loadRoutes is one routedetails call plus one shape per route — sixteen
+// requests, seconds in the ordinary case — so the timeout is a bound on a
+// pathological start rather than an expected wait.
+const (
+	referenceSettleInterval = 15 * time.Second
+	referenceSettleTimeout  = 5 * time.Minute
+)
+
+// awaitReference blocks until the count of routes that can be linearly
+// referenced stops changing, or the timeout runs out.
+//
+// Stability rather than a fixed count, because there is no way to ask how many
+// routes *will* resolve: a route whose shape fails to load never resolves at
+// all, and waiting for it would wait forever. Two consecutive samples agreeing
+// is the signal that loading has finished, whatever it finished at.
+func (j *Job) awaitReference(ctx context.Context) {
+	deadline := time.Now().Add(referenceSettleTimeout)
+	last := -1
+	for time.Now().Before(deadline) {
+		n := j.resolvable()
+		if n > 0 && n == last {
+			return
+		}
+		last = n
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(referenceSettleInterval):
+		}
+	}
+}
+
+// resolvable counts the routes the rollup can currently place stops on.
+func (j *Job) resolvable() int {
+	n := 0
+	for _, routeCode := range j.ref.Routes() {
+		if _, _, _, ok := j.reference(routeCode); ok {
+			n++
+		}
+	}
+	return n
 }
 
 // Backfill re-derives every service day still covered by raw fixes, oldest
@@ -96,22 +155,31 @@ func (j *Job) Run(ctx context.Context) {
 // schedule matching that had never run at all — apply to history that is already
 // recorded, and are worth nothing until something re-reads it.
 //
-// Safe to run repeatedly. ReplaceAggregates clears each route's window before
-// inserting, so a day derived twice ends up with one copy, not two.
+// Runs at most once per process, and only with a reference to work from: a
+// server that started with no network must retry rather than record that it has
+// swept nothing. Safe to run repeatedly regardless — ReplaceAggregates clears
+// each route's window before inserting, so a day derived twice ends up with one
+// copy, not two.
 func (j *Job) Backfill(ctx context.Context, now time.Time) {
+	if !j.swept && j.resolvable() > 0 {
+		j.sweep(ctx, now)
+		j.swept = true
+	}
+	j.Once(ctx, now)
+}
+
+// sweep re-derives every completed service day the raw fixes still cover.
+func (j *Job) sweep(ctx context.Context, now time.Time) {
 	stats, err := j.store.Stats(ctx)
 	if err != nil {
 		j.log.Warn("backfill could not read store stats", "err", err)
-		j.Once(ctx, now)
+		return
+	}
+	if stats.OldestFixMs <= 0 {
 		return
 	}
 
 	current := ServiceDayStart(now)
-	if stats.OldestFixMs <= 0 {
-		j.Once(ctx, now)
-		return
-	}
-
 	from := ServiceDayStart(time.UnixMilli(stats.OldestFixMs))
 	if earliest := current.AddDate(0, 0, -MaxBackfillDays); from.Before(earliest) {
 		from = earliest
@@ -119,25 +187,32 @@ func (j *Job) Backfill(ctx context.Context, now time.Time) {
 
 	started := time.Now()
 	days := 0
+	arrivals := int64(0)
 	for day := from; day.Before(current); day = day.Add(24 * time.Hour) {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		if j.rollUp(ctx, day, day.Add(24*time.Hour)) > 0 {
-			// A completed day, derived from every fix it will ever have. Mark it
-			// so the ordinary pass does not queue it up again.
-			j.done[ServiceDate(day)] = true
-			days++
+		if j.done[ServiceDate(day)] {
+			continue
 		}
+		j.rollUp(ctx, day, day.Add(24*time.Hour))
+		// Marked done whether or not it yielded anything. The reference has
+		// settled, so a day that derived nothing is a day with nothing in it —
+		// not one that arrived too early to be read — and retrying it every half
+		// hour for the life of the process would buy nothing.
+		j.done[ServiceDate(day)] = true
+		days++
 	}
 	if days > 0 {
-		j.log.Info("backfill complete", "days", days,
-			"from", ServiceDate(from), "took", time.Since(started).Round(time.Millisecond))
+		stats, err := j.store.Stats(ctx)
+		if err == nil {
+			arrivals = stats.Arrivals
+		}
+		j.log.Info("backfill complete", "days", days, "from", ServiceDate(from),
+			"arrivalsNow", arrivals, "took", time.Since(started).Round(time.Millisecond))
 	}
-
-	j.Once(ctx, now)
 }
 
 // Once rolls up the service day in progress, and the previous one if it has
