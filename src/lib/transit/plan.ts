@@ -356,6 +356,59 @@ export function itinerarySignature(it: Itinerary): string {
     .join('|');
 }
 
+/**
+ * The buses a signature rides, board and alight stops included.
+ *
+ * Walking is what the signature carries to tell a walk-only trip from a bus one,
+ * and it is also the part that moves between one search and the next, so most
+ * matching wants the rest of it.
+ */
+function ridesOf(signature: string): string[] {
+  return signature.split('|').filter((part) => !part.startsWith('walk:'));
+}
+
+/** The same rides with their boarding stops dropped: which buses, to where. */
+function destinationsOf(signature: string): string[] {
+  return ridesOf(signature).map((ride) => ride.replace(/@[^>]*>/, '>'));
+}
+
+/**
+ * The same journey in a plan worked out later: the same buses boarded and left
+ * at the same stops, whatever the walking around them now measures.
+ *
+ * The metres in a walk leg are not stable. Routing a walk along real footpaths
+ * rewrites the leg it was measured from, and the crow-flies estimate itself
+ * moves with the stop the planner boards at — so a signature compared whole
+ * loses the trip a rider is sitting at the stop waiting for.
+ */
+export function findSameJourney(list: Itinerary[], signature: string): Itinerary | null {
+  const wanted = ridesOf(signature).join('|');
+  return list.find((it) => ridesOf(itinerarySignature(it)).join('|') === wanted) ?? null;
+}
+
+/**
+ * The journey a shared link asks for, in the plan as it stands now.
+ *
+ * A link is opened minutes or days after it was written, into a plan that is not
+ * the one it was written from. Departures come and go, and the stop the planner
+ * boards at moves with them: the same R2 to Carnival is boarded at the rider's
+ * own stop at 14:11 and half a kilometre up the road at 14:12, because by then
+ * the bus has gone past. Matching a link exactly therefore strands nearly every
+ * one of them on the results list, which is no way to share a trip — so this
+ * widens the question by a step, from the same buses at the same stops to the
+ * same buses to the same places, and answers with nothing only when those buses
+ * are not being offered at all.
+ */
+export function findSharedJourney(list: Itinerary[], signature: string): Itinerary | null {
+  const exact = findSameJourney(list, signature);
+  if (exact) return exact;
+
+  const wanted = destinationsOf(signature).join('|');
+  // The list is in the order the rider is being offered it, so where several
+  // trips ride the same buses to the same stops this takes the best of them.
+  return list.find((it) => destinationsOf(itinerarySignature(it)).join('|') === wanted) ?? null;
+}
+
 function routesTouching(graph: TransitGraph, marked: Set<StopCode>): Set<string> {
   const out = new Set<string>();
   for (const stopCode of marked) {
@@ -363,6 +416,27 @@ function routesTouching(graph: TransitGraph, marked: Set<StopCode>): Set<string>
   }
   return out;
 }
+
+/**
+ * A way of getting aboard: which trip, boarded where, and how far the rider had
+ * to walk to be standing there.
+ */
+interface Boarding {
+  trip: TripView;
+  index: number;
+  label: Label;
+  /** Metres already on foot between the origin and this boarding. */
+  walkM: number;
+}
+
+/**
+ * How much walking a boarding has to save to be carried alongside the earliest
+ * departure, rather than dropped in favour of it.
+ *
+ * Below this the two are the same journey with the stop moved a few doors down,
+ * and offering both would only make the rider read the difference twice.
+ */
+const ALT_BOARDING_WALK_SAVING_M = 200;
 
 /**
  * Scan a route once, forward around its loop.
@@ -374,8 +448,17 @@ function routesTouching(graph: TransitGraph, marked: Set<StopCode>): Set<string>
  * carries riders over that stretch — so the scan runs `MAX_WRAP_STOPS` positions
  * past the end, indexing by position around the loop rather than into the array.
  *
- * The wrap can never reach the boarding stop again: it is capped at `boardIndex`
- * as well, so no rider is sold a second lap of the route they are already on.
+ * The wrap can never reach a boarding stop again: an alighting is dropped once
+ * the loop comes back round to the stop it boarded at, so no rider is sold a
+ * second lap of the route they are already on.
+ *
+ * Two boardings are carried, not one. On earliest departure alone, a rider whose
+ * own stop the bus had just left was sent walking up the route to intercept it,
+ * and the option of waiting where they stood for the next one was overwritten
+ * inside this scan and never built at all — so it could not be ranked, offered,
+ * or chosen however much walking it saved. `walkSaver` keeps that boarding alive
+ * whenever it saves real walking; which of the two is the better trade is then
+ * the ranking's business, and the rider's.
  */
 function relaxRoute(
   graph: TransitGraph,
@@ -388,39 +471,41 @@ function relaxRoute(
   busArrivals: Label[],
   liveAtStop?: Map<StopCode, LiveEta>,
 ): void {
-  let boardIndex = -1;
-  let boardLabel: Label | null = null;
-  let trip: TripView | null = null;
+  let leader: Boarding | null = null;
+  let walkSaver: Boarding | null = null;
 
-  // `boardIndex` is settled by the time the scan passes the last stop, since
-  // boarding only happens below that, so the wrap's extent is known when needed.
-  for (let i = 0; i < route.stops.length + Math.min(MAX_WRAP_STOPS, Math.max(0, boardIndex)); i++) {
+  // Boarding only happens below the last stop, so by the time the scan reaches
+  // it the wrap's extent is settled.
+  for (let i = 0; i < route.stops.length + wrapPositions(leader, walkSaver); i++) {
     const stopCode = stopAtPosition(route, i).stopCode;
 
     // Ride: having boarded upstream, can we alight here?
-    if (trip && boardIndex >= 0 && boardLabel) {
-      const arrival = arrivalAt(graph, route, trip, boardIndex, i, boardLabel);
-      if (arrival != null) {
-        const label: Label = {
-          stopCode,
-          arriveAt: arrival.at,
-          round,
-          via: {
-            kind: 'bus',
-            from: boardLabel,
-            routeCode: route.code,
-            departAt: departureAt(trip, boardIndex, boardLabel),
-            estimated: arrival.estimated,
-            live: trip.live,
-          },
-        };
-        busArrivals.push(label);
+    for (const boarding of aboard(leader, walkSaver)) {
+      // Back round to where this one got on: that is a second lap, not a ride.
+      if (i - route.stops.length >= boarding.index) continue;
 
-        const existing = best.get(stopCode);
-        if (!existing || arrival.at < existing.arriveAt) {
-          best.set(stopCode, label);
-          improved.add(stopCode);
-        }
+      const arrival = arrivalAt(graph, route, boarding.trip, boarding.index, i, boarding.label);
+      if (arrival == null) continue;
+
+      const label: Label = {
+        stopCode,
+        arriveAt: arrival.at,
+        round,
+        via: {
+          kind: 'bus',
+          from: boarding.label,
+          routeCode: route.code,
+          departAt: departureAt(boarding.trip, boarding.index, boarding.label),
+          estimated: arrival.estimated,
+          live: boarding.trip.live,
+        },
+      };
+      busArrivals.push(label);
+
+      const existing = best.get(stopCode);
+      if (!existing || arrival.at < existing.arriveAt) {
+        best.set(stopCode, label);
+        improved.add(stopCode);
       }
     }
 
@@ -433,13 +518,13 @@ function relaxRoute(
     if (!label || !marked.has(stopCode)) continue;
 
     const readyAt = label.arriveAt + (label.round === 0 ? 0 : MIN_TRANSFER_MIN);
-    const candidate = earliestTrip(route, i, readyAt, liveAtStop?.get(stopCode));
-    if (!candidate) continue;
+    const trip = earliestTrip(route, i, readyAt, liveAtStop?.get(stopCode));
+    if (!trip) continue;
 
-    if (!trip || !boardLabel) {
-      trip = candidate;
-      boardIndex = i;
-      boardLabel = label;
+    const candidate: Boarding = { trip, index: i, label, walkM: walkedSoFar(label) };
+
+    if (!leader) {
+      leader = candidate;
       continue;
     }
 
@@ -448,19 +533,82 @@ function relaxRoute(
     // stop above this one — the same bus always leaves upstream earlier — which
     // walked riders back up the route to catch the very bus they were standing
     // in front of. A trip that leaves this stop sooner is genuinely earlier.
-    const current = departureFrom(trip, i, boardLabel);
-    if (current == null) continue;
+    const current = departureFrom(leader.trip, i, leader.label);
+    if (current != null) {
+      const departure = departureAt(trip, i, label);
+      // The same bus either way: take the boarding the rider is standing at
+      // soonest, which is the one that walks them least.
+      const sameDeparture = departure === current && label.arriveAt < leader.label.arriveAt;
+      if (departure < current || sameDeparture) {
+        walkSaver = leastWalk(leader, walkSaver, candidate);
+        leader = candidate;
+        continue;
+      }
+    }
 
-    const departure = departureAt(candidate, i, label);
-    // The same bus either way: take the boarding the rider is standing at
-    // soonest, which is the one that walks them least.
-    const sameDeparture = departure === current && label.arriveAt < boardLabel.arriveAt;
-    if (departure < current || sameDeparture) {
-      trip = candidate;
-      boardIndex = i;
-      boardLabel = label;
+    // No earlier than the bus already boarded, so it is only worth carrying if
+    // the rider walks materially less to reach it.
+    walkSaver = leastWalk(candidate, walkSaver, leader);
+  }
+}
+
+/** The boardings a scan is riding, in the order they were made. */
+function aboard(leader: Boarding | null, walkSaver: Boarding | null): Boarding[] {
+  if (!leader) return [];
+  return walkSaver ? [leader, walkSaver] : [leader];
+}
+
+/** How far past the last stop the scan may run, given what has been boarded. */
+function wrapPositions(...boardings: (Boarding | null)[]): number {
+  const deepest = Math.max(0, ...boardings.map((b) => b?.index ?? -1));
+  return Math.min(MAX_WRAP_STOPS, deepest);
+}
+
+/**
+ * Which boarding to carry beside the one that catches the earliest bus.
+ *
+ * Only one that saves real walking against `leader` earns the place; anything
+ * else is the same journey from a stop a few doors along, and re-checking it on
+ * every change of leader is what stops a saver outliving the gap that justified
+ * it.
+ */
+function leastWalk(
+  candidate: Boarding,
+  current: Boarding | null,
+  leader: Boarding,
+): Boarding | null {
+  const saves = (b: Boarding | null): b is Boarding =>
+    b != null && b.walkM + ALT_BOARDING_WALK_SAVING_M <= leader.walkM;
+  if (!saves(candidate)) return saves(current) ? current : null;
+  if (!saves(current)) return candidate;
+  return candidate.walkM <= current.walkM ? candidate : current;
+}
+
+/**
+ * Metres already walked to be standing at this label, transfers included.
+ *
+ * Read back along the chain rather than carried on every label: it is wanted
+ * only where two boardings are weighed against each other, and a chain is a
+ * handful of legs long.
+ */
+function walkedSoFar(label: Label): number {
+  let meters = 0;
+  let cursor: Label | null = label;
+  let guard = 0;
+
+  while (cursor && guard++ < 32) {
+    const via: Label['via'] = cursor.via;
+    if (via.kind === 'origin') {
+      meters += via.meters;
+      cursor = null;
+    } else if (via.kind === 'walk') {
+      meters += via.meters;
+      cursor = via.from;
+    } else {
+      cursor = via.from;
     }
   }
+  return meters;
 }
 
 /**
@@ -794,15 +942,21 @@ export function finalizeItinerary(legs: Leg[], id: string): Itinerary {
 }
 
 /**
- * Keeps one itinerary per combination of routes.
+ * Keeps the best itinerary per combination of routes, and its walk-saving twin.
  *
  * The search naturally finds a dozen near-identical trips down the same routes
  * that differ only in which stop you get off at and how far you then walk.
  * Showing four of those is useless; a rider choosing between options wants
  * genuinely different buses, so only the best trip per route sequence survives.
+ *
+ * One exception, because it is not a near-identical trip at all: an option down
+ * the same routes that walks materially less is kept beside it. Waiting at your
+ * own stop for the next bus rather than walking half a kilometre to catch the
+ * one that has just gone is a trade the rider makes — the weights can only guess
+ * at it — and both are ranked on their merits from here.
  */
 function dedupe(list: Itinerary[], walkPreference: WalkPreference): Itinerary[] {
-  const bestPerRouteCombo = new Map<string, Itinerary>();
+  const byRouteCombo = new Map<string, Itinerary[]>();
 
   for (const it of list) {
     const key =
@@ -811,14 +965,29 @@ function dedupe(list: Itinerary[], walkPreference: WalkPreference): Itinerary[] 
         .map((l) => l.route.code)
         .join('>') || 'walk';
 
-    const existing = bestPerRouteCombo.get(key);
-    if (
-      !existing ||
-      generalizedCost(it, walkPreference) < generalizedCost(existing, walkPreference)
-    ) {
-      bestPerRouteCombo.set(key, it);
-    }
+    const group = byRouteCombo.get(key);
+    if (group) group.push(it);
+    else byRouteCombo.set(key, [it]);
   }
 
-  return [...bestPerRouteCombo.values()];
+  const cost = (it: Itinerary) => generalizedCost(it, walkPreference);
+  const cheaper = (a: Itinerary, b: Itinerary) => (cost(b) < cost(a) ? b : a);
+  const out: Itinerary[] = [];
+
+  for (const group of byRouteCombo.values()) {
+    const best = group.reduce(cheaper);
+    out.push(best);
+
+    // Kept in either direction, since which one `best` is depends on the rider's
+    // own walk preference: beside a zero-walk wait sits the faster option that
+    // walks for it, and beside a walk-ahead sits the one that waits instead.
+    const trades = group.filter(
+      (it) =>
+        Math.abs(it.totalWalkM - best.totalWalkM) >= ALT_BOARDING_WALK_SAVING_M &&
+        !(it.totalWalkM > best.totalWalkM && it.arriveAt >= best.arriveAt),
+    );
+    if (trades.length > 0) out.push(trades.reduce(cheaper));
+  }
+
+  return out;
 }

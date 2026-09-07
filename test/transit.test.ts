@@ -10,6 +10,8 @@ import {
   rideMeters,
 } from '@/lib/transit/buildGraph';
 import {
+  findSameJourney,
+  findSharedJourney,
   generalizedCost,
   itinerarySignature,
   MAX_WRAP_STOPS,
@@ -502,6 +504,138 @@ function ranked(over: Partial<Itinerary>): Itinerary {
     ...over,
   };
 }
+
+describe('boarding where the rider is standing', () => {
+  // R2 calls at Flat No. 147 (index 3) twelve minutes before Amin Avenue (index
+  // 6), and both are within walking distance of the flats. The 14:11 departure
+  // from Flat No. 147 is the 14:23 from Amin Avenue: the same bus.
+  const flats = stopPlace('109');
+  const carnival = stopPlace('201');
+  const r2Only = (it: Itinerary) => {
+    const buses = it.legs.filter((l): l is BusLeg => l.kind === 'bus');
+    return buses.length === 1 && buses[0].route.routeNumber === 'R2';
+  };
+
+  it('boards the stop the rider is at while its bus is still to come', () => {
+    const results = planJourney(graph, flats, carnival, { departAt: parseClock('14:11')! });
+    const direct = results.find(r2Only)!;
+    const bus = direct.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+    expect(bus.boardStop.code).toBe('109');
+    expect(direct.totalWalkM).toBe(0);
+  });
+
+  it('walks ahead to intercept a bus that has already gone past', () => {
+    // Once 14:11 is gone the next R2 from the flats is 14:26, and walking 531 m
+    // to Amin Avenue catches the one that just left, fifteen minutes earlier.
+    const results = planJourney(graph, flats, carnival, {
+      departAt: parseClock('14:12')!,
+      walkPreference: 'balanced',
+    });
+    const ahead = results.filter(r2Only).find((it) => it.totalWalkM > 0)!;
+    const bus = ahead.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+
+    expect(bus.boardStop.code).toBe('114');
+    expect(bus.departAt).toBe(parseClock('14:23'));
+  });
+
+  it('still offers the bus that comes to the rider, walking nothing', () => {
+    // The whole point: the walk-ahead is a trade, not an instruction. Ranking on
+    // earliest departure alone overwrote this option inside the route scan, so
+    // it could not be shown however much walking it saved.
+    for (const walkPreference of ['less', 'balanced', 'more'] as const) {
+      const results = planJourney(graph, flats, carnival, {
+        departAt: parseClock('14:12')!,
+        walkPreference,
+      });
+      const waited = results.filter(r2Only).find((it) => it.totalWalkM === 0);
+
+      expect(waited, `no wait-here option under ${walkPreference}`).toBeDefined();
+      const bus = waited!.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+      expect(bus.boardStop.code).toBe('109');
+      expect(bus.departAt).toBe(parseClock('14:26'));
+    }
+  });
+
+  it('ranks the two by what the rider said walking is worth', () => {
+    const under = (walkPreference: 'less' | 'more') =>
+      planJourney(graph, flats, carnival, {
+        departAt: parseClock('14:12')!,
+        walkPreference,
+      }).filter(r2Only);
+
+    // Whichever comes first of the pair: waiting when walking is dear, the
+    // earlier bus when it is cheap.
+    expect(under('less')[0].totalWalkM).toBe(0);
+    expect(under('more')[0].totalWalkM).toBeGreaterThan(0);
+  });
+
+  it('does not split a route into near-identical twins', () => {
+    // A boarding a few doors down the road is the same journey, and offering it
+    // twice spends a slot the rider needed for a different bus.
+    const results = planJourney(graph, stopPlace('103'), stopPlace('114'), {
+      departAt: parseClock('12:00')!,
+    });
+    const signatures = results.map(itinerarySignature);
+    expect(new Set(signatures).size).toBe(signatures.length);
+
+    for (const a of results) {
+      for (const b of results) {
+        if (a === b) continue;
+        const sameRoutes =
+          itinerarySignature(a).replace(/@[^>]*>/g, '>') ===
+          itinerarySignature(b).replace(/@[^>]*>/g, '>');
+        if (sameRoutes) expect(Math.abs(a.totalWalkM - b.totalWalkM)).toBeGreaterThanOrEqual(200);
+      }
+    }
+  });
+});
+
+describe('finding a journey again in a later plan', () => {
+  const results = planJourney(graph, stopPlace('109'), stopPlace('201'), {
+    departAt: parseClock('14:12')!,
+    walkPreference: 'balanced',
+  });
+
+  it('matches the trip a rider is waiting for, whatever the walk now measures', () => {
+    const it = results[0];
+    const routed = itinerarySignature(it).replace(/walk:\d+/g, 'walk:1');
+
+    expect(findSameJourney(results, routed)).toBe(it);
+    expect(findSameJourney(results, itinerarySignature(it))).toBe(it);
+  });
+
+  it('will not confuse two ways of riding the same route', () => {
+    // Both ride R2 to Carnival; one walks to Amin Avenue first.
+    const [ahead, waited] = results
+      .filter((it) => it.legs.filter((l) => l.kind === 'bus').length === 1)
+      .sort((a, b) => b.totalWalkM - a.totalWalkM);
+    expect(ahead.totalWalkM).toBeGreaterThan(0);
+    expect(waited.totalWalkM).toBe(0);
+
+    expect(findSameJourney(results, itinerarySignature(ahead))).toBe(ahead);
+    expect(findSameJourney(results, itinerarySignature(waited))).toBe(waited);
+  });
+
+  it('opens a shared link whose boarding stop the planner has since moved', () => {
+    // A link written while the R2 was boarded at Centro Mall, opened at a time
+    // when it is boarded elsewhere. Matched whole it finds nothing and strands
+    // the rider on the results list, which is what makes a link unshareable.
+    const link = 'walk:517|132@401>201';
+    expect(findSameJourney(results, link)).toBeNull();
+
+    const shared = findSharedJourney(results, link)!;
+    expect(shared).toBeDefined();
+    const bus = shared.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+    expect(bus.route.code).toBe('132');
+    expect(bus.alightStop.code).toBe('201');
+  });
+
+  it('answers with nothing when those buses are not being offered', () => {
+    expect(findSharedJourney(results, '999@103>114')).toBeNull();
+    expect(findSharedJourney(results, 'walk:517|132@401>103')).toBeNull();
+  });
+});
 
 describe('generalizedCost', () => {
   it('charges every fare, so a cheaper trip wins a near-tie on time', () => {

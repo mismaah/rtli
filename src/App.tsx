@@ -30,7 +30,7 @@ import { useWakeLock } from '@/hooks/useWakeLock';
 import { useSavedPlaces } from '@/store/savedPlaces';
 import { useRecentTrips } from '@/store/recentTrips';
 import { boundsOf } from '@/lib/geo';
-import { itinerarySignature } from '@/lib/transit/plan';
+import { findSameJourney, findSharedJourney, itinerarySignature } from '@/lib/transit/plan';
 import { applyWalkPaths, walkLineOf } from '@/lib/transit/walkPaths';
 import { riddenStopCodes } from '@/lib/transit/routeShape';
 import {
@@ -154,17 +154,25 @@ export default function App() {
    * been worked out. Declared after the effect above so that on a link carrying
    * a route the detail screen, not the results list, is what settles.
    *
-   * One shot, and dropped as soon as any plan exists: a bus that has since left
-   * takes its itinerary out of the results, and a link that missed its trip
-   * should leave the rider on the list rather than ambushing them with a detail
-   * screen minutes later when a matching departure comes round again.
+   * It waits for the live pass before giving up. A schedule-only plan is what
+   * renders first, and the ETAs that follow it a moment later can move the
+   * boarding stop or drop a departure entirely — abandoning the link on the
+   * first plan therefore threw away trips that the very next render was about to
+   * offer. Once the feed has been read the answer is as good as it gets.
+   *
+   * Still one shot: a bus that has since left takes its itinerary out of the
+   * results, and a link that missed its trip should leave the rider on the list
+   * rather than ambushing them with a detail screen minutes later when a
+   * matching departure comes round again.
    */
   useEffect(() => {
     const signature = pendingRoute.current;
     if (!signature || itineraries.length === 0) return;
+
+    const match = findSharedJourney(itineraries, signature);
+    if (!match && !liveApplied) return;
     pendingRoute.current = null;
 
-    const match = itineraries.find((it) => itinerarySignature(it) === signature);
     if (!match) {
       // No trip to be part-way through.
       pendingStep.current = null;
@@ -174,7 +182,7 @@ export default function App() {
     setSelected(match);
     setView('detail');
     setSnap('half');
-  }, [itineraries]);
+  }, [itineraries, liveApplied]);
 
   const stops = useMemo(() => (graph ? [...graph.stops.values()] : []), [graph]);
 
@@ -251,8 +259,7 @@ export default function App() {
    */
   const activeSelection = useMemo(() => {
     if (!selected) return null;
-    const signature = itinerarySignature(selected);
-    return itineraries.find((it) => itinerarySignature(it) === signature) ?? selected;
+    return findSameJourney(itineraries, itinerarySignature(selected)) ?? selected;
   }, [selected, itineraries]);
 
   /**
