@@ -61,10 +61,17 @@ func NewJob(db *store.DB, ref Reference, log *slog.Logger) *Job {
 	return &Job{store: db, ref: ref, log: log, done: map[string]bool{}, lines: map[string]*Line{}}
 }
 
-// Run rolls up on a ticker until ctx is cancelled, starting with one pass so a
-// restart does not leave the aggregates a full interval behind.
+// MaxBackfillDays bounds a backfill, so a database whose raw retention has been
+// widened cannot turn one restart into an hours-long re-derivation. Raw fixes
+// live store.RawRetention; this is the most of that a single startup will chew
+// through, and a later restart picks up whatever is left.
+const MaxBackfillDays = 90
+
+// Run rolls up on a ticker until ctx is cancelled, starting with a backfill so
+// a restart does not leave the aggregates a full interval behind — and so a
+// change to how they are derived reaches the history as well as today.
 func (j *Job) Run(ctx context.Context) {
-	j.Once(ctx, time.Now())
+	j.Backfill(ctx, time.Now())
 
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
@@ -76,6 +83,61 @@ func (j *Job) Run(ctx context.Context) {
 			j.Once(ctx, now)
 		}
 	}
+}
+
+// Backfill re-derives every service day still covered by raw fixes, oldest
+// first, then hands over to the ordinary two-day pass.
+//
+// Once alone only ever looks at today and yesterday, which is right while the
+// derivation is stable and wrong the moment it changes: a fix that was recorded
+// weeks ago is still on disk, still the only evidence of an arrival, and nothing
+// would ever revisit it. Both of the corrections this shipped alongside — the
+// stop resolver that had been dropping six routes to a single stop each, and the
+// schedule matching that had never run at all — apply to history that is already
+// recorded, and are worth nothing until something re-reads it.
+//
+// Safe to run repeatedly. ReplaceAggregates clears each route's window before
+// inserting, so a day derived twice ends up with one copy, not two.
+func (j *Job) Backfill(ctx context.Context, now time.Time) {
+	stats, err := j.store.Stats(ctx)
+	if err != nil {
+		j.log.Warn("backfill could not read store stats", "err", err)
+		j.Once(ctx, now)
+		return
+	}
+
+	current := ServiceDayStart(now)
+	if stats.OldestFixMs <= 0 {
+		j.Once(ctx, now)
+		return
+	}
+
+	from := ServiceDayStart(time.UnixMilli(stats.OldestFixMs))
+	if earliest := current.AddDate(0, 0, -MaxBackfillDays); from.Before(earliest) {
+		from = earliest
+	}
+
+	started := time.Now()
+	days := 0
+	for day := from; day.Before(current); day = day.Add(24 * time.Hour) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if j.rollUp(ctx, day, day.Add(24*time.Hour)) > 0 {
+			// A completed day, derived from every fix it will ever have. Mark it
+			// so the ordinary pass does not queue it up again.
+			j.done[ServiceDate(day)] = true
+			days++
+		}
+	}
+	if days > 0 {
+		j.log.Info("backfill complete", "days", days,
+			"from", ServiceDate(from), "took", time.Since(started).Round(time.Millisecond))
+	}
+
+	j.Once(ctx, now)
 }
 
 // Once rolls up the service day in progress, and the previous one if it has
@@ -116,7 +178,7 @@ func (j *Job) rollUp(ctx context.Context, from, to time.Time) int {
 		default:
 		}
 
-		line, refs, ok := j.reference(routeCode)
+		line, refs, sched, ok := j.reference(routeCode)
 		if !ok {
 			continue
 		}
@@ -135,7 +197,7 @@ func (j *Job) rollUp(ctx context.Context, from, to time.Time) int {
 			derived = append(derived, Fix{BusCode: f.BusCode, AtMs: f.AtMs, Lat: f.Lat, Lng: f.Lng})
 		}
 
-		a := Arrivals(derived, refs, line)
+		a := Annotate(Arrivals(derived, refs, line), sched)
 		s := Segments(a, refs)
 		h := Headways(a)
 
@@ -160,11 +222,12 @@ func (j *Job) rollUp(ctx context.Context, from, to time.Time) int {
 	return routes
 }
 
-// reference resolves a route's geometry and stop positions, caching the result.
-func (j *Job) reference(routeCode string) (*Line, []StopRef, bool) {
+// reference resolves a route's geometry, stop positions and timetable, caching
+// what is expensive to rebuild.
+func (j *Job) reference(routeCode string) (*Line, []StopRef, *Schedule, bool) {
 	stops, ok := j.ref.RouteStops(routeCode)
 	if !ok || len(stops) == 0 {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	line, cached := j.lines[routeCode]
 	if !cached {
@@ -172,19 +235,23 @@ func (j *Job) reference(routeCode string) (*Line, []StopRef, bool) {
 		if !ok {
 			// A route whose shape never loaded cannot be linearly referenced,
 			// so its positions stay raw rather than being guessed at.
-			return nil, nil, false
+			return nil, nil, nil, false
 		}
 		line = NewLine(lines)
 		j.lines[routeCode] = line
 	}
 	if line == nil {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	refs := ResolveStops(stops, line)
 	if len(refs) == 0 {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
-	return line, refs, true
+	// Not cached: the published timetable is reloaded by the poller through the
+	// day, and a stale copy here would measure lateness against yesterday.
+	// Building it is a walk over one route's stops, which is nothing beside the
+	// arrival derivation it feeds.
+	return line, refs, NewSchedule(stops), true
 }
 
 // ServiceDate is the Malé civil date a moment belongs to. Matches
@@ -209,6 +276,7 @@ func storeArrivals(routeCode string, in []Arrival) []store.Arrival {
 	for _, a := range in {
 		out = append(out, store.Arrival{
 			RouteCode: routeCode, StopCode: a.StopCode, BusCode: a.BusCode, AtMs: a.AtMs,
+			TripOrder: a.TripOrder, SchedMin: a.SchedMin, DeltaMin: a.DeltaMin,
 		})
 	}
 	return out
@@ -229,6 +297,7 @@ func storeHeadways(routeCode string, in []Headway) []store.Headway {
 	for _, h := range in {
 		out = append(out, store.Headway{
 			RouteCode: routeCode, StopCode: h.StopCode, AtMs: h.AtMs, Secs: h.Secs,
+			SameBus: h.SameBus,
 		})
 	}
 	return out

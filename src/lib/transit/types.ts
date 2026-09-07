@@ -50,8 +50,50 @@ export interface Route {
   stops: RouteStop[];
   /** Empty for frequency-based routes (R10/R11/R12/R15). */
   trips: Trip[];
-  /** Set only when `trips` is empty — assumed headway in minutes. */
+  /**
+   * Set only when `trips` is empty — the headway in minutes to plan on.
+   *
+   * `DEFAULT_HEADWAY_MIN` until the recorder has measured the route, then the
+   * median wait it observed. `measured` says which, and is what a caller should
+   * read before telling a rider this number came from anywhere.
+   */
   headwayMin?: number;
+  /**
+   * What the backend's recorder measured about this route, when it had enough
+   * observations to say anything. Absent on every route until the history has
+   * been fetched and applied, and absent afterwards on routes too thinly
+   * observed to measure.
+   */
+  measured?: RouteMeasurements;
+}
+
+/**
+ * Measured behaviour attached to a route, in the units the planner works in.
+ *
+ * Kept separate from the fields it feeds so provenance survives: `headwayMin`
+ * on the route is the number to plan with, and this is where it came from.
+ */
+export interface RouteMeasurements {
+  /** Median observed wait in minutes, absent when too little was seen. */
+  headwayMin?: number;
+  headwaySamples: number;
+  /** The wait is one bus lapping, because the route runs a single vehicle. */
+  headwayIsLap: boolean;
+  /** Median observed wait per hour of the Malé day, keyed "0".."23". */
+  headwayByHour?: Record<string, number>;
+  /**
+   * Median minutes late against the published timetable, per hour. Positive is
+   * late. Recorded and surfaced, but deliberately not applied to departure
+   * times; see the note in `plan.ts`.
+   */
+  latenessByHour?: Record<string, number>;
+  latenessSamples: number;
+  /**
+   * Median ride in *minutes* between adjacent stops, keyed "fromStop>toStop".
+   * Converted from the seconds the server serves, because minutes are what the
+   * planner adds up.
+   */
+  segmentMin?: Record<string, number>;
 }
 
 export interface WalkTransfer {

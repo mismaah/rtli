@@ -144,17 +144,19 @@ func main() {
 			options.Hub = broker
 			options.Poller = live
 
-			// A second handle that SQLite itself will not let write, so a
-			// diagnostic query can never become a change, and a slow one
-			// cannot stall the single connection the poller records through.
-			if len(options.AdminKeys) > 0 {
-				reader, err := store.OpenReadOnly(ctx, *dbPath)
-				if err != nil {
-					log.Error("could not open a read-only handle; diagnostics will not include the store", "err", err)
-				} else {
-					defer reader.Close()
-					options.ReadDB = reader
-				}
+			// A second handle that SQLite itself will not let write, so a read
+			// can never become a change, and a slow one cannot stall the single
+			// connection the poller records through.
+			//
+			// Opened whenever there is a store, not only when diagnostics are
+			// enabled: /v1/history reads through it too, and that is a public
+			// endpoint every client wants.
+			reader, err := store.OpenReadOnly(ctx, *dbPath)
+			if err != nil {
+				log.Error("could not open a read-only handle; /v1/history and store diagnostics are unavailable", "err", err)
+			} else {
+				defer reader.Close()
+				options.ReadDB = reader
 			}
 			log.Info("history and live streaming enabled", "db", *dbPath,
 				"rawRetention", store.RawRetention, "aggregateRetention", store.AggregateRetention,

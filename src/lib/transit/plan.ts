@@ -1,5 +1,11 @@
 import { walkMeters, walkSeconds } from '@/lib/geo';
-import { estimateRideMinutes, rideMeters, stopAtPosition } from './buildGraph';
+import { headwayMinutesAt } from './applyHistory';
+import {
+  DEFAULT_HEADWAY_MIN,
+  estimateRideMinutes,
+  rideMeters,
+  stopAtPosition,
+} from './buildGraph';
 import type {
   BusLeg,
   Itinerary,
@@ -518,7 +524,21 @@ function earliestTrip(
     const none = { times: [], elapsed: [], repairsBefore: [] };
     return catchable
       ? { ...none, shift: 0, liveDepartAt, live, estimated: true, headwayMin: 0 }
-      : { ...none, shift: 0, estimated: true, headwayMin: route.headwayMin ?? 15 };
+      : {
+          ...none,
+          shift: 0,
+          estimated: true,
+          // The measured wait for this hour where the recorder has one, the
+          // route's assumption otherwise. Hour of day matters more here than
+          // anywhere else in the planner: a route every 15 minutes at 08:00 is
+          // not one every 15 minutes at 23:00, and the rider planning the late
+          // journey is the one who most needs the wait to be honest.
+          headwayMin: headwayMinutesAt(
+            route.measured,
+            readyAt,
+            route.headwayMin ?? DEFAULT_HEADWAY_MIN,
+          ),
+        };
   }
 
   if (catchable) {

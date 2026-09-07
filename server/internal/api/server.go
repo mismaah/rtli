@@ -81,6 +81,10 @@ type Server struct {
 	shapes *cache.Cache[json.RawMessage]
 	etas   *cache.Cache[*rtl.StopsEta]
 	live   *cache.Cache[*rtl.LiveCoordinates]
+	// history is the measured summary at /v1/history. Cached separately from
+	// the rest because it is derived from the store rather than fetched from
+	// upstream, and is far more expensive to build than to serve.
+	history *cache.Cache[json.RawMessage]
 
 	startedAt time.Time
 
@@ -128,8 +132,10 @@ type Options struct {
 	// default — leaves the route unregistered, so the endpoint is not merely
 	// closed but absent.
 	AdminKeys []ssh.PublicKey
-	// ReadDB backs the admin store queries. It must be a handle that cannot
-	// write; see store.OpenReadOnly.
+	// ReadDB backs the admin store queries and /v1/history. It must be a handle
+	// that cannot write; see store.OpenReadOnly. Without it /v1/history answers
+	// 503 and the admin store operations are unavailable, but nothing else here
+	// is affected.
 	ReadDB *store.DB
 	// Logs backs the admin log tail.
 	Logs *logbuf.Buffer
@@ -160,6 +166,7 @@ func NewServer(opts Options) *Server {
 		graph:      cache.New[json.RawMessage](graphTTL, graphMaxStale),
 		shapes:     cache.New[json.RawMessage](shapeTTL, shapeMaxStale),
 		etas:       cache.New[*rtl.StopsEta](etasTTL, etasMaxStale),
+		history:    cache.New[json.RawMessage](historyTTL, historyMaxStale),
 		live:       cache.New[*rtl.LiveCoordinates](liveTTL, liveMaxStale),
 		startedAt:  time.Now(),
 		hub:        opts.Hub,
@@ -189,6 +196,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/graph", s.handleGraph)
 	mux.HandleFunc("GET /v1/shapes/{routeCode}", s.handleShape)
 	mux.HandleFunc("GET /v1/etas", s.handleEtas)
+	mux.HandleFunc("GET /v1/history", s.handleHistory)
 	mux.HandleFunc("GET /v1/live/stream", s.handleLiveStream)
 	mux.HandleFunc("GET /v1/live/{routeCode}", s.handleLive)
 

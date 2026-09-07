@@ -150,9 +150,83 @@ func TestJobRollsUpRecordedFixes(t *testing.T) {
 	if stats.Segments < 14 {
 		t.Errorf("segments = %d, want roughly one per stop pair", stats.Segments)
 	}
-	// One bus alone can never establish a headway.
+	// One lap crosses each stop once, so no stop has a second arrival to have
+	// waited for. A bus going round twice would record laps, flagged SameBus.
 	if stats.Headways != 0 {
-		t.Errorf("headways = %d, want 0 from a single bus", stats.Headways)
+		t.Errorf("headways = %d, want 0 from a single lap", stats.Headways)
+	}
+}
+
+// Once only ever looks at today and yesterday, which is right while the
+// derivation is stable and wrong the moment it changes: raw fixes outlive the
+// aggregates derived from them, so a corrected derivation has to be able to
+// reach back over history that is already on disk.
+func TestBackfillRederivesOlderDays(t *testing.T) {
+	line, stops := r1(t)
+	shapeRaw, err := os.ReadFile(fixtureDir + "roadshape-r1.json")
+	if err != nil {
+		t.Fatalf("read roadshape: %v", err)
+	}
+	ref := &fixtureRef{stops: stops, lines: geo.Polylines(shapeRaw)}
+
+	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "backfill.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	// Four days of laps, the oldest well outside anything Once would look at.
+	now := mustParse(t, "2026-09-06T06:00:00Z")
+	var fixes []store.Fix
+	for day := 1; day <= 4; day++ {
+		start := now.AddDate(0, 0, -day)
+		for d := 0.0; d < line.Length(); d += 100 {
+			lat, lng := alongR1(line, d)
+			fixes = append(fixes, store.Fix{
+				RouteCode: "133", BusCode: "C1",
+				AtMs: start.Add(time.Duration(d/10) * time.Second).UnixMilli(),
+				Lat:  lat, Lng: lng, SnapLat: &lat, SnapLng: &lng,
+			})
+		}
+	}
+	if err := db.InsertFixes(t.Context(), fixes); err != nil {
+		t.Fatalf("InsertFixes: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// What the old behaviour reaches: yesterday, and nothing before it.
+	NewJob(db, ref, log).Once(t.Context(), now)
+	after, err := db.Stats(t.Context())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	NewJob(db, ref, log).Backfill(t.Context(), now)
+	backfilled, err := db.Stats(t.Context())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	if backfilled.Arrivals <= after.Arrivals {
+		t.Errorf("backfill derived %d arrivals against Once's %d; the older days "+
+			"were never revisited", backfilled.Arrivals, after.Arrivals)
+	}
+	// Once reaches one of the four days; the backfill reaches all of them.
+	if backfilled.Arrivals < 3*after.Arrivals {
+		t.Errorf("backfill derived %d arrivals against %d for a single day; it did not "+
+			"cover all four", backfilled.Arrivals, after.Arrivals)
+	}
+
+	// Idempotent: a day derived twice must end up with one copy, not two.
+	NewJob(db, ref, log).Backfill(t.Context(), now)
+	again, err := db.Stats(t.Context())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if again.Arrivals != backfilled.Arrivals {
+		t.Errorf("a second backfill changed arrivals from %d to %d; it is not idempotent",
+			backfilled.Arrivals, again.Arrivals)
 	}
 }
 

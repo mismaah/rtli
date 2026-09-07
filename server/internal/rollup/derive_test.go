@@ -136,15 +136,20 @@ func TestSegmentsOnlyPairAdjacentStops(t *testing.T) {
 	}
 }
 
-// A bus coming round again is a lap, not a headway: nobody waiting at the stop
-// was served by the bus they just watched leave.
-func TestHeadwaysNeedADifferentBus(t *testing.T) {
+// A bus coming round again is a lap rather than a headway, and the two must stay
+// tellable apart — but on a one-bus route the lap is the only wait there is, so
+// it is recorded and flagged rather than dropped.
+func TestHeadwaysFlagALap(t *testing.T) {
 	sameBus := []Arrival{
 		{StopCode: "A", BusCode: "B1", AtMs: 0},
 		{StopCode: "A", BusCode: "B1", AtMs: 600_000},
 	}
-	if got := Headways(sameBus); len(got) != 0 {
-		t.Errorf("recorded %d headways from one bus lapping, want 0", len(got))
+	lap := Headways(sameBus)
+	if len(lap) != 1 || lap[0].Secs != 600 {
+		t.Fatalf("got %+v, want one 600 s lap", lap)
+	}
+	if !lap[0].SameBus {
+		t.Error("a bus lapping its own stop was not flagged SameBus")
 	}
 
 	twoBuses := []Arrival{
@@ -155,8 +160,23 @@ func TestHeadwaysNeedADifferentBus(t *testing.T) {
 	if len(got) != 1 || got[0].Secs != 600 {
 		t.Fatalf("got %+v, want one 600 s headway", got)
 	}
+	if got[0].SameBus {
+		t.Error("a wait ended by a second bus was flagged SameBus")
+	}
 	if got[0].AtMs != 600_000 {
 		t.Errorf("headway timed at %d, want the moment the wait ended", got[0].AtMs)
+	}
+}
+
+// Two buses at one stop seconds apart are bunched, not a service a rider can
+// use, and averaging them in understates every wait on the route.
+func TestHeadwaysDropBunching(t *testing.T) {
+	arrivals := []Arrival{
+		{StopCode: "A", BusCode: "B1", AtMs: 0},
+		{StopCode: "A", BusCode: "B2", AtMs: int64(MinHeadwaySecs-1) * 1000},
+	}
+	if got := Headways(arrivals); len(got) != 0 {
+		t.Errorf("recorded %d headways from bunched buses, want 0", len(got))
 	}
 }
 

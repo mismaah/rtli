@@ -40,9 +40,25 @@ const (
 	// reached.
 	MaxSpeedMps = 30.0
 
+	// MinSegmentSecs is the shortest ride between two stops worth believing.
+	//
+	// Stops are ~100 m apart at the tightest and a bus is not covering that in
+	// under ten seconds. Anything faster is one interpolation artefact or two:
+	// a stop pair the geometry places closer together than they are, or a fix
+	// gap wide enough that several crossings got spread across it. Measured on
+	// the live store, 476 of 17894 segments were under 10 s and 1754 under 30 —
+	// a long enough tail to drag a route's mean ride time visibly short.
+	MinSegmentSecs = 10
+
 	// MaxSegmentSecs bounds a plausible ride between two adjacent stops. Longer
 	// than this and the bus was held somewhere, not riding.
 	MaxSegmentSecs = 30 * 60
+
+	// MinHeadwaySecs is the shortest wait worth recording. Two buses a minute
+	// apart at one stop are bunched, and a rider who arrives at that stop does
+	// not experience a one-minute service — they experience the gap before the
+	// pair. On the live store this excluded 191 of 12798 headways.
+	MinHeadwaySecs = 60
 
 	// MaxHeadwaySecs bounds a plausible wait. Anything longer is a service gap
 	// — a lull, a shift change, the overnight break — and averaging it into a
@@ -59,10 +75,18 @@ type Fix struct {
 }
 
 // Arrival is a bus reaching a stop.
+//
+// TripOrder, SchedMin and DeltaMin are filled by Annotate where the route
+// publishes a timetable, and left nil where it does not. Nil is meaningful and
+// is not the same as zero: a route with no timetable cannot be late.
 type Arrival struct {
 	StopCode string
 	BusCode  string
 	AtMs     int64
+
+	TripOrder *int
+	SchedMin  *float64
+	DeltaMin  *float64
 }
 
 // Segment is one observed ride between two adjacent stops.
@@ -74,10 +98,16 @@ type Segment struct {
 }
 
 // Headway is one observed wait between successive buses at a stop.
+//
+// SameBus marks a wait ended by the same vehicle coming round again. Those are
+// laps rather than headways in the usual sense and must not be averaged in with
+// the rest — but on a route worked by one bus at a time they are the only wait
+// a rider ever has, so they are recorded and flagged rather than discarded.
 type Headway struct {
 	StopCode string
 	AtMs     int64 // when the wait ended, i.e. when the second bus arrived
 	Secs     float64
+	SameBus  bool
 }
 
 // Arrivals derives when each bus reached each stop.
@@ -214,7 +244,7 @@ func Segments(arrivals []Arrival, refs []StopRef) []Segment {
 				continue
 			}
 			secs := float64(to.AtMs-from.AtMs) / 1000
-			if secs <= 0 || secs > MaxSegmentSecs {
+			if secs < MinSegmentSecs || secs > MaxSegmentSecs {
 				continue
 			}
 			out = append(out, Segment{
@@ -234,9 +264,18 @@ func Segments(arrivals []Arrival, refs []StopRef) []Segment {
 
 // Headways derives how long a rider waited between buses at each stop.
 //
-// Two arrivals by the *same* bus are a lap, not a headway: a rider who has just
-// watched a bus leave is not served by that same bus coming round again in the
-// sense a headway means. Only a different vehicle ends the wait.
+// Two arrivals by the same bus are a lap rather than a headway in the usual
+// sense, and mixing the two would describe a wait no rider on a busy route ever
+// has. They are kept, flagged with SameBus, because discarding them costs the
+// routes that need this most everything they have: R12 is worked by one bus at
+// a time, so successive arrivals at its stops are nearly always that same bus
+// coming round. Over six days it recorded 1416 arrivals and, with laps thrown
+// away, eight headways — one per stop, each the once-a-day handover between
+// vehicles. For a rider standing at an R12 stop the lap time *is* the wait.
+//
+// Which of the two applies is a question about service, not about geometry, so
+// it is left to the consumer: prefer the different-bus waits where a stop has
+// enough of them, and fall back to laps where it does not.
 func Headways(arrivals []Arrival) []Headway {
 	byStop := make(map[string][]Arrival)
 	for _, a := range arrivals {
@@ -247,14 +286,22 @@ func Headways(arrivals []Arrival) []Headway {
 	for stopCode, run := range byStop {
 		sort.Slice(run, func(i, j int) bool { return run[i].AtMs < run[j].AtMs })
 		for i := 1; i < len(run); i++ {
-			if run[i].BusCode == run[i-1].BusCode {
-				continue
-			}
 			secs := float64(run[i].AtMs-run[i-1].AtMs) / 1000
 			if secs <= 0 || secs > MaxHeadwaySecs {
 				continue
 			}
-			out = append(out, Headway{StopCode: stopCode, AtMs: run[i].AtMs, Secs: secs})
+			// Two vehicles reported at the same stop within a few seconds of
+			// each other are a bunching artefact, not a wait a rider could
+			// have had. Left in, these were 191 of 12798 records.
+			if secs < MinHeadwaySecs {
+				continue
+			}
+			out = append(out, Headway{
+				StopCode: stopCode,
+				AtMs:     run[i].AtMs,
+				Secs:     secs,
+				SameBus:  run[i].BusCode == run[i-1].BusCode,
+			})
 		}
 	}
 

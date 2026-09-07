@@ -379,8 +379,22 @@ function buildWalkTransfers(stops: Map<StopCode, Stop>): Map<StopCode, WalkTrans
 }
 
 /**
- * Synthesised ride time between two positions on a frequency route, from
- * straight-line distance along the intermediate stops at an assumed speed.
+ * Ride time between two positions on a frequency route.
+ *
+ * Measured where the recorder has watched the stretch enough times to have a
+ * median for it, and synthesised from straight-line distance at
+ * `ESTIMATED_BUS_SPEED_KMH` where it has not.
+ *
+ * The measurement is worth reaching for because a single average speed cannot
+ * describe this network: a stretch through Malé's grid and a stretch of the
+ * Hulhumalé link road are the same distance apart on the map and nothing like
+ * the same ride. The estimate is not merely imprecise there, it is wrong in
+ * opposite directions on the two halves of the same route.
+ *
+ * Mixed per stop pair rather than all-or-nothing. A route usually has medians
+ * for most of its pairs and none for the one an unlucky week never observed, and
+ * falling back to the assumed speed for that pair alone is far better than
+ * discarding every real measurement beside it.
  */
 export function estimateRideMinutes(
   route: Route,
@@ -388,7 +402,7 @@ export function estimateRideMinutes(
   fromIndex: number,
   toIndex: number,
 ): number {
-  return spanMinutes(route.stops, stops, fromIndex, toIndex);
+  return spanMinutes(route.stops, stops, fromIndex, toIndex, route.measured?.segmentMin);
 }
 
 /**
@@ -446,14 +460,36 @@ function spanMeters(
   return meters;
 }
 
+/**
+ * Ride time across a span, pair by pair.
+ *
+ * `measured` is the route's median seconds-turned-minutes per adjacent stop
+ * pair, where the recorder has any. A pair it covers contributes its observed
+ * time — which already includes the dwell at the stop it ends on, because it was
+ * timed between two arrivals — and a pair it does not falls back to distance at
+ * the assumed speed plus a nominal dwell.
+ */
 function spanMinutes(
   routeStops: RouteStop[],
   stops: Map<StopCode, Stop>,
   fromIndex: number,
   toIndex: number,
+  measured?: Record<string, number>,
 ): number {
-  const meters = spanMeters(routeStops, stops, fromIndex, toIndex);
-  const minutes = (meters / 1000 / ESTIMATED_BUS_SPEED_KMH) * 60;
-  // Dwell time at each intermediate stop.
-  return Math.max(1, Math.round(minutes + (toIndex - fromIndex) * 0.4));
+  let minutes = 0;
+  for (let i = fromIndex; i < toIndex; i++) {
+    const from = positionStop(routeStops, i);
+    const to = positionStop(routeStops, i + 1);
+    const observed = measured?.[`${from.stopCode}>${to.stopCode}`];
+    if (observed != null) {
+      minutes += observed;
+      continue;
+    }
+    const a = stops.get(from.stopCode);
+    const b = stops.get(to.stopCode);
+    const meters = a && b ? haversineMeters(a, b) * ROAD_DETOUR_FACTOR : 0;
+    // Distance at the assumed speed, plus dwell at the stop this hop ends on.
+    minutes += (meters / 1000 / ESTIMATED_BUS_SPEED_KMH) * 60 + 0.4;
+  }
+  return Math.max(1, Math.round(minutes));
 }

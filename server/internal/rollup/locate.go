@@ -226,39 +226,58 @@ func ResolveStops(stops []rtl.Stop, line *Line) []StopRef {
 		return nil
 	}
 
-	// Seed from the first stop's *best* projection rather than its earliest.
-	// With nothing behind it there is no order to appeal to, and the earliest
-	// candidate can be a distant graze of the line — on R1 that is a 47 m
-	// offset where the true stop is 9 m away.
-	first := placed[0].cands[0]
-	for _, c := range placed[0].cands[1:] {
-		if c.OffsetM < first.OffsetM {
-			first = c
-		}
-	}
+	// Seed by trying every projection the first stop has and keeping the walk
+	// that places the most stops.
+	//
+	// Seeding from its *nearest* projection instead is the obvious thing and is
+	// wrong, because the walk that follows is monotonic and cannot wrap: every
+	// later stop must land further along the line than the one before it. When
+	// the first stop is a terminal the route returns to, its two projections are
+	// the start of the line and the end of it, they fit about equally well, and
+	// picking on offset alone is a coin toss. Landing on the end anchors the
+	// whole sequence past every remaining stop, and all of them are dropped.
+	//
+	// Measured against the live shapes, that coin came up wrong on six of
+	// fifteen routes — R5, R8, R9, R10, R14 and R15 each resolved a single stop
+	// out of ten to nineteen, with the anchor within 45 m of the end of a line
+	// up to 20 km long. They had been recording for days: 174k of the 461k fixes
+	// on record distilled to 201 arrivals between them. Choosing the seed by
+	// what it yields rather than by how near it sits restores all six, and
+	// leaves the nine that already worked byte for byte unchanged.
+	var best []StopRef
+	bestOffset := 0.0
+	for _, seed := range placed[0].cands {
+		refs := make([]StopRef, 0, len(placed))
+		refs = append(refs, StopRef{Code: placed[0].stop.Code, Order: placed[0].stop.Order, AlongM: seed.AlongM})
+		prev := seed.AlongM
 
-	refs := make([]StopRef, 0, len(placed))
-	refs = append(refs, StopRef{Code: placed[0].stop.Code, Order: placed[0].stop.Order, AlongM: first.AlongM})
-	prev := first.AlongM
-
-	for _, p := range placed[1:] {
-		chosen := -1.0
-		for _, c := range p.cands {
-			if c.AlongM > prev {
-				chosen = c.AlongM
-				break
+		for _, p := range placed[1:] {
+			chosen := -1.0
+			for _, c := range p.cands {
+				if c.AlongM > prev {
+					chosen = c.AlongM
+					break
+				}
 			}
+			if chosen < 0 {
+				// Nothing ahead. The route order and the geometry disagree,
+				// which happens when a shape is incomplete. Dropping the stop
+				// keeps the sequence monotonic and loses only that stop.
+				continue
+			}
+			refs = append(refs, StopRef{Code: p.stop.Code, Order: p.stop.Order, AlongM: chosen})
+			prev = chosen
 		}
-		if chosen < 0 {
-			// Nothing ahead. The route order and the geometry disagree, which
-			// happens when a shape is incomplete. Dropping the stop keeps the
-			// sequence monotonic and loses only that stop.
-			continue
+
+		// Ties go to the tighter fit, which is what the old seeding was reaching
+		// for and is still right once coverage has been settled: on R1 the
+		// earliest candidate is a 47 m graze where the true stop is 9 m away,
+		// and both seeds place all 18 stops.
+		if len(refs) > len(best) || (len(refs) == len(best) && seed.OffsetM < bestOffset) {
+			best, bestOffset = refs, seed.OffsetM
 		}
-		refs = append(refs, StopRef{Code: p.stop.Code, Order: p.stop.Order, AlongM: chosen})
-		prev = chosen
 	}
-	return refs
+	return best
 }
 
 // JitterBackM is how far a position may appear to slip backwards along the

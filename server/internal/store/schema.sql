@@ -87,10 +87,15 @@ CREATE TABLE IF NOT EXISTS headway_obs (
   stop_code  TEXT    NOT NULL,
   at_ms      INTEGER NOT NULL,
   secs       REAL    NOT NULL,
+  -- 1 when the wait was ended by the same vehicle coming round again. Those are
+  -- laps, not headways in the usual sense, and must not be mixed into the same
+  -- average -- but on a route worked by one bus at a time they are the only
+  -- wait a rider ever has. Recorded and flagged so the consumer can choose.
+  same_bus   INTEGER NOT NULL DEFAULT 0,
   dow        INTEGER NOT NULL,
   hour       INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS headway_obs_bucket ON headway_obs (route_code, stop_code, dow, hour);
+CREATE INDEX IF NOT EXISTS headway_obs_bucket ON headway_obs (route_code, stop_code, same_bus, dow, hour);
 CREATE INDEX IF NOT EXISTS headway_obs_at     ON headway_obs (at_ms);
 
 -- The merged full-day timetable per service date. This is what lets a phone

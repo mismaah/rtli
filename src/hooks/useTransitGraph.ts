@@ -1,6 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { fetchRouteDetails, type Via } from '@/api/rtl';
 import { backendWorthAsking, COOLDOWN_MS } from '@/api/backend';
+import { fetchHistory } from '@/api/history';
+import { applyHistory } from '@/lib/transit/applyHistory';
 import { buildGraph } from '@/lib/transit/buildGraph';
 import { loadOfflineRouteDetails, mergeWithStoredTimetable } from '@/lib/timetableCache';
 import type { TransitGraph } from '@/lib/transit/types';
@@ -94,7 +96,18 @@ export function useTransitGraph() {
         // merge finds nothing to add — but it still writes the snapshot that
         // keeps offline planning working, so it runs on both paths.
         const merged = await mergeWithStoredTimetable(raw);
-        return { graph: buildGraph(merged), source: 'network', fromCache: false, via };
+        // Best-effort, and awaited only after the graph's own data is in hand:
+        // measurements are an overlay that improves the estimates on frequency
+        // routes, never something the app needs to start. `fetchHistory`
+        // resolves to null on every failure there is, so this cannot throw the
+        // session into the offline path.
+        const history = await fetchHistory(signal);
+        return {
+          graph: applyHistory(buildGraph(merged), history),
+          source: 'network',
+          fromCache: false,
+          via,
+        };
       } catch (err) {
         // A cancellation is not a failure to reach anything, so it must not be
         // answered with the snapshot — an ordinary unmount would otherwise

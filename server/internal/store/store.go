@@ -28,16 +28,23 @@ var schema string
 // Retention windows. Raw fixes are bulky and short-lived; what is learned from
 // them is small and worth keeping.
 //
-// RawRetention is 60 days rather than the 7 the tiering intends, because the
-// rollup that would distil fixes into stop_arrival, segment_obs and headway_obs
-// does not exist yet. Until it does, deleting a fix deletes the only copy of
-// what it could have taught, and the ETA-correction work needs weeks of it.
-// Drop this back to 7 days once the rollup is running and has backfilled.
+// RawRetention stays at 60 days rather than the 7 the tiering intends, now for
+// a different reason than it was originally set.
 //
-// Sizing: day one measured ~9.5 MB/day at the old 20 s recording floor. The
-// floor is now 10 s and a moving bus clears the jitter radius within either
-// interval, so expect roughly double — ~19 MB/day, so ~1.1 GB at 60 days
-// against ~130 MB at 7. Worth re-measuring after a day at the new rate.
+// It was 60 because the rollup did not exist and a deleted fix was the only
+// copy of what it could have taught. The rollup exists now — but the first six
+// days it ran, it was silently dropping six of fifteen routes to a single stop
+// each, and nothing would have revisited them if the fixes behind them had
+// already been pruned. rollup.Backfill re-derives what is still on disk, and it
+// can only reach as far back as this window allows.
+//
+// So the window is a hedge against the derivation being wrong again, which it
+// has been once. It costs disk, and disk is the cheapest thing here.
+//
+// Sizing, measured over six days in production: ~77k fixes/day at the 10 s
+// recording floor, ~12 MB/day of database including the aggregates derived from
+// it. That is ~740 MB at 60 days against ~85 MB at 7. The earlier ~19 MB/day
+// projection was pessimistic; the jitter filter drops more than it assumed.
 const (
 	RawRetention       = 60 * 24 * time.Hour
 	AggregateRetention = 90 * 24 * time.Hour
@@ -68,11 +75,71 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		handle.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := migrate(ctx, handle); err != nil {
+		handle.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	if err := ensureAutoVacuum(ctx, handle); err != nil {
 		handle.Close()
 		return nil, fmt.Errorf("auto_vacuum: %w", err)
 	}
 	return &DB{sql: handle}, nil
+}
+
+// migrate brings an existing database up to the embedded schema.
+//
+// schema.sql is all CREATE ... IF NOT EXISTS, which builds a fresh database
+// correctly and does nothing at all to one that already has the table under an
+// older definition. Anything that changes a table already in production has to
+// be spelled out here as well as there.
+func migrate(ctx context.Context, handle *sql.DB) error {
+	added, err := ensureColumn(ctx, handle, "headway_obs", "same_bus",
+		`ALTER TABLE headway_obs ADD COLUMN same_bus INTEGER NOT NULL DEFAULT 0`)
+	if err != nil {
+		return err
+	}
+	if added {
+		// The bucket index now carries same_bus so laps can be filtered without
+		// a scan. CREATE INDEX IF NOT EXISTS will not redefine the existing one,
+		// so it is dropped and rebuilt — once, on the upgrade that adds the
+		// column, rather than on every open.
+		for _, stmt := range []string{
+			`DROP INDEX IF EXISTS headway_obs_bucket`,
+			`CREATE INDEX IF NOT EXISTS headway_obs_bucket
+			   ON headway_obs (route_code, stop_code, same_bus, dow, hour)`,
+		} {
+			if _, err := handle.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("rebuild headway_obs_bucket: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// ensureColumn adds a column if the table does not already have it, reporting
+// whether it did anything. SQLite has no ADD COLUMN IF NOT EXISTS.
+func ensureColumn(ctx context.Context, handle *sql.DB, table, column, alter string) (bool, error) {
+	rows, err := handle.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, fmt.Errorf("inspect %s: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, fmt.Errorf("inspect %s: %w", table, err)
+		}
+		if name == column {
+			return false, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("inspect %s: %w", table, err)
+	}
+	if _, err := handle.ExecContext(ctx, alter); err != nil {
+		return false, fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return true, nil
 }
 
 // ensureAutoVacuum repairs a database created before the pragma ordering in
@@ -256,8 +323,10 @@ func maleBucket(atMs int64) (dow, hour int) {
 	return int(t.Weekday()), t.Hour()
 }
 
-// Arrival is one bus reaching one stop. TripOrder, SchedMin and DeltaMin stay
-// nil until there is a stored timetable to compare against.
+// Arrival is one bus reaching one stop. TripOrder, SchedMin and DeltaMin are
+// filled by the rollup where the route publishes a timetable, and stay nil where
+// it does not — nil is not the same as zero, because a route with no timetable
+// cannot be late.
 type Arrival struct {
 	RouteCode string
 	StopCode  string
@@ -277,12 +346,15 @@ type Segment struct {
 	Secs      float64
 }
 
-// Headway is one observed wait between successive buses at a stop.
+// Headway is one observed wait between successive buses at a stop. SameBus
+// marks a wait ended by the same vehicle coming round again: a lap rather than
+// a headway, and the only wait there is on a route worked by one bus at a time.
 type Headway struct {
 	RouteCode string
 	StopCode  string
 	AtMs      int64
 	Secs      float64
+	SameBus   bool
 }
 
 // FixRow is a recorded position, read back for rolling up. The snapped position
@@ -376,7 +448,8 @@ func (db *DB) ReplaceAggregates(ctx context.Context, routeCode string, fromMs, t
 	}
 
 	headwayStmt, err := tx.PrepareContext(ctx, `INSERT INTO headway_obs
-		(route_code, stop_code, at_ms, secs, dow, hour) VALUES (?, ?, ?, ?, ?, ?)`)
+		(route_code, stop_code, at_ms, secs, same_bus, dow, hour)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -384,7 +457,7 @@ func (db *DB) ReplaceAggregates(ctx context.Context, routeCode string, fromMs, t
 	for _, h := range headways {
 		dow, hour := maleBucket(h.AtMs)
 		if _, err := headwayStmt.ExecContext(ctx, h.RouteCode, h.StopCode,
-			h.AtMs, h.Secs, dow, hour); err != nil {
+			h.AtMs, h.Secs, h.SameBus, dow, hour); err != nil {
 			return fmt.Errorf("insert headway: %w", err)
 		}
 	}

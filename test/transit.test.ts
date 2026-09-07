@@ -3,6 +3,8 @@ import fixture from './fixtures/routedetails.json';
 import roadShapeR1 from './fixtures/roadshape-r1.json';
 import {
   buildGraph,
+  DEFAULT_HEADWAY_MIN,
+  estimateRideMinutes,
   MAX_PLAUSIBLE_BUS_KMH,
   MAX_TRANSFER_WALK_M,
   rideMeters,
@@ -73,6 +75,8 @@ import {
 import { useRecentTrips } from '@/store/recentTrips';
 import type { LiveBus } from '@/api/rtl';
 import type { RouteDetailsResponse } from '@/api/rtl';
+import type { HistorySummary } from '@/api/history';
+import { applyHistory, headwayMinutesAt } from '@/lib/transit/applyHistory';
 import type { BusLeg, Itinerary, Place, WalkLeg } from '@/lib/transit/types';
 import type { WalkPath } from '@/api/walking';
 
@@ -1720,5 +1724,158 @@ describe('a journey being travelled', () => {
     expect(journeyFraction(steps, steps.length - 1)).toBe(1);
     expect(journeyFraction(steps, 1)).toBeGreaterThan(0);
     expect(journeyFraction([], 0)).toBe(0);
+  });
+});
+
+describe('applying measured history', () => {
+  /** A fresh graph, so a test that mutates one cannot reach the shared fixture. */
+  function freshGraph() {
+    return buildGraph(fixture as unknown as RouteDetailsResponse);
+  }
+
+  function summary(routes: HistorySummary['routes']): HistorySummary {
+    return { generatedAtMs: Date.now(), fromMs: 0, routes };
+  }
+
+  it('leaves the graph exactly as built when there is no history', () => {
+    const g = freshGraph();
+    const before = g.routes.get('122')!.headwayMin;
+    applyHistory(g, null);
+    expect(g.routes.get('122')!.headwayMin).toBe(before);
+    expect(g.routes.get('122')!.measured).toBeUndefined();
+  });
+
+  it('replaces the assumed headway on a frequency route with the measured one', () => {
+    const g = freshGraph();
+    expect(g.routes.get('122')!.headwayMin).toBe(DEFAULT_HEADWAY_MIN);
+
+    applyHistory(
+      g,
+      summary({ '122': { headwayMin: 22.5, headwaySamples: 400, latenessSamples: 0 } }),
+    );
+    expect(g.routes.get('122')!.headwayMin).toBe(22.5);
+    expect(g.routes.get('122')!.measured?.headwaySamples).toBe(400);
+  });
+
+  // A thin bucket is one bus's afternoon. Planning a rider's journey on it is
+  // worse than planning on an assumption that at least announces itself.
+  it('keeps the assumption when too little was observed', () => {
+    const g = freshGraph();
+    applyHistory(
+      g,
+      summary({ '122': { headwayMin: 2, headwaySamples: 3, latenessSamples: 0 } }),
+    );
+    expect(g.routes.get('122')!.headwayMin).toBe(DEFAULT_HEADWAY_MIN);
+    // Still attached, so a caller can see what was measured and how thinly.
+    expect(g.routes.get('122')!.measured?.headwayMin).toBe(2);
+  });
+
+  // A scheduled route's own departures beat any median of the gaps between them.
+  it('does not give a scheduled route a headway', () => {
+    const g = freshGraph();
+    applyHistory(
+      g,
+      summary({ '133': { headwayMin: 15, headwaySamples: 5000, latenessSamples: 100 } }),
+    );
+    expect(g.routes.get('133')!.headwayMin).toBeUndefined();
+    expect(g.routes.get('133')!.measured?.headwayMin).toBe(15);
+  });
+
+  it('converts segment seconds to the minutes the planner adds up', () => {
+    const g = freshGraph();
+    const route = g.routes.get('122')!;
+    const [a, b] = route.stops;
+    applyHistory(
+      g,
+      summary({
+        '122': {
+          headwaySamples: 0,
+          latenessSamples: 0,
+          segmentSecs: { [`${a.stopCode}>${b.stopCode}`]: 150 },
+        },
+      }),
+    );
+    expect(route.measured?.segmentMin?.[`${a.stopCode}>${b.stopCode}`]).toBe(2.5);
+  });
+
+  // A single average speed cannot describe a network with both a city grid and
+  // a link road in it. Where a stretch has been watched, the watching wins.
+  it('rides a measured stretch at its measured time, not the assumed speed', () => {
+    const g = freshGraph();
+    const route = g.routes.get('122')!;
+    const assumed = estimateRideMinutes(route, g.stops, 0, 1);
+
+    const [a, b] = route.stops;
+    applyHistory(
+      g,
+      summary({
+        '122': {
+          headwaySamples: 0,
+          latenessSamples: 0,
+          segmentSecs: { [`${a.stopCode}>${b.stopCode}`]: (assumed + 6) * 60 },
+        },
+      }),
+    );
+    expect(estimateRideMinutes(route, g.stops, 0, 1)).toBe(Math.round(assumed + 6));
+  });
+
+  // Most pairs measured and one never observed is the normal state of a route.
+  // Falling back for that pair alone beats discarding every real measurement.
+  it('falls back per stop pair rather than all at once', () => {
+    const g = freshGraph();
+    const route = g.routes.get('122')!;
+    const wholeSpan = estimateRideMinutes(route, g.stops, 0, 2);
+    const firstHop = estimateRideMinutes(route, g.stops, 0, 1);
+
+    const [a, b] = route.stops;
+    applyHistory(
+      g,
+      summary({
+        '122': {
+          headwaySamples: 0,
+          latenessSamples: 0,
+          segmentSecs: { [`${a.stopCode}>${b.stopCode}`]: (firstHop + 10) * 60 },
+        },
+      }),
+    );
+    // The measured hop moved; the unmeasured one beside it did not.
+    expect(estimateRideMinutes(route, g.stops, 0, 2)).toBe(Math.round(wholeSpan + 10));
+  });
+});
+
+describe('headwayMinutesAt', () => {
+  const measured = {
+    headwayMin: 20,
+    headwaySamples: 500,
+    headwayIsLap: false,
+    headwayByHour: { '8': 12, '23': 45 },
+    latenessSamples: 0,
+  };
+
+  it('prefers the measurement for the hour being planned', () => {
+    expect(headwayMinutesAt(measured, 8 * 60 + 30, 15)).toBe(12);
+    expect(headwayMinutesAt(measured, 23 * 60, 15)).toBe(45);
+  });
+
+  it('falls back to the route median for an hour with no measurement', () => {
+    expect(headwayMinutesAt(measured, 14 * 60, 15)).toBe(20);
+  });
+
+  it('falls back to the caller assumption when nothing was measured', () => {
+    expect(headwayMinutesAt(undefined, 8 * 60, 15)).toBe(15);
+    expect(
+      headwayMinutesAt({ ...measured, headwaySamples: 2 }, 8 * 60, 15),
+    ).toBe(15);
+  });
+
+  // Planning runs past midnight, and the hour bucket has to come back round
+  // rather than going negative or off the end.
+  it('wraps past midnight', () => {
+    // 08:00 the next day is still the 08:00 bucket.
+    expect(headwayMinutesAt(measured, 24 * 60 + 8 * 60, 15)).toBe(12);
+    // An hour before midnight is 23:00, not a negative hour off the end.
+    expect(headwayMinutesAt(measured, -60, 15)).toBe(45);
+    // And an hour with no measurement still falls back to the route median.
+    expect(headwayMinutesAt(measured, 24 * 60 + 14 * 60, 15)).toBe(20);
   });
 });

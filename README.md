@@ -260,6 +260,63 @@ two positions either side of it, rather than by waiting for a position to happen
 to land near the stop. Raw positions are pruned after weeks; what was learned
 from them is kept for months.
 
+#### What the history is actually used for
+
+`GET /v1/history` serves the distillation back as medians — the one endpoint here
+that returns something RTL does not publish. The client folds it over the built
+graph in [`applyHistory.ts`](src/lib/transit/applyHistory.ts) and it replaces two
+assumptions the planner used to make:
+
+| Assumption | Replaced by |
+|---|---|
+| `DEFAULT_HEADWAY_MIN`, a flat 15 min | The route's median observed wait, per hour of the day |
+| `ESTIMATED_BUS_SPEED_KMH`, a flat 18 km/h | The median observed ride for that specific stop pair |
+
+Medians rather than means throughout, because waits are not symmetric: buses
+bunch and then leave a gap, so R6's mean headway of 14.7 min sits between two
+modes and describes neither, while individual waits run from 2.1 to 75.
+
+The fallback is per value rather than all-or-nothing. A bucket with fewer than
+`MIN_HEADWAY_SAMPLES` observations behind it is one bus's afternoon, not a
+measurement, and the assumption is kept — a stop pair nobody happened to observe
+falls back to distance and speed while every measured pair beside it still counts.
+No history at all, which is every client with no backend configured, leaves the
+graph exactly as it was built.
+
+Lateness against the published timetable is measured and served too, but is
+deliberately *not* applied to departure times. Shifting a boarding later by the
+median delay tells a rider to arrive after half the buses have already gone.
+
+#### What the recorder got wrong for its first six days
+
+Worth writing down, because the symptom was invisible from the outside: the
+recorder looked healthy the whole time.
+
+`ResolveStops` walks a route's stops in published order and pins each to the
+first projection ahead of the last — a monotonic walk, which is what disentangles
+a stop served in both directions. It seeded that walk from the first stop's
+*nearest* projection. On a route whose first stop is a terminal the bus returns
+to, that stop projects about equally well onto the start of the line and the end
+of it, and picking on offset alone is a coin toss. Landing on the end anchors the
+sequence past every remaining stop, and the walk cannot wrap, so all of them are
+dropped.
+
+The coin came up wrong on six of fifteen routes. R5, R8, R9, R10, R14 and R15
+each resolved a single stop out of ten to nineteen. Between them they had
+recorded 174k of the 461k fixes on the database and distilled 201 arrivals.
+Choosing the seed by how many stops it places, rather than by how near it sits,
+restores all six and leaves the nine that already worked unchanged.
+
+Three smaller things were wrong alongside it. `sched_min` and `delta_min` had
+columns and an index but nothing ever computed them, so schedule adherence was
+unmeasured on all eleven timetabled routes. Headways discarded every wait ended
+by the same bus as "a lap, not a headway" — true on a busy route, and on R12,
+which runs one vehicle at a time, it discarded 1416 arrivals down to 8 headways
+when the lap *is* the wait. And nothing ever re-derived a finished day, so a
+correction to any of this would have reached today and yesterday and left the
+weeks behind them as they were; `rollup.Backfill` now walks every service day the
+raw fixes still cover.
+
 #### What the poll rate actually is
 
 Measured against the live feed, not assumed: **each bus's position advances on a
@@ -293,6 +350,7 @@ true age of the reading.
 | `GET /v1/graph` | Routes, stops and timetables, in RTL's own shape |
 | `GET /v1/shapes/{routeCode}` | Route geometry, pre-simplified (R2: 374 KB → 8.6 KB) |
 | `GET /v1/etas?routes=…` | One request in place of a per-route fan-out |
+| `GET /v1/history` | Measured headways, ride times and lateness — see above |
 | `GET /v1/live/stream?routes=…` | SSE: snapshot on connect, then per-bus deltas |
 | `GET /v1/live/{routeCode}` | Plain-JSON positions, for clients that cannot stream |
 | `GET /v1/meta`, `/healthz` | Freshness and liveness |
