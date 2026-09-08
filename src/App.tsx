@@ -27,11 +27,12 @@ import { useOnline } from '@/hooks/useOnline';
 import { useWideLayout } from '@/hooks/useWideLayout';
 import { useWalkPaths } from '@/hooks/useWalkPaths';
 import { useJourney } from '@/hooks/useJourney';
+import { useNowMinutes } from '@/hooks/useNowMinutes';
 import { useWakeLock } from '@/hooks/useWakeLock';
 import { useSavedPlaces } from '@/store/savedPlaces';
 import { useRecentTrips } from '@/store/recentTrips';
 import { boundsOf } from '@/lib/geo';
-import { findSameJourney, findSharedJourney, itinerarySignature } from '@/lib/transit/plan';
+import { findSharedJourney, itinerarySignature, refreshItinerary } from '@/lib/transit/plan';
 import { applyWalkPaths, walkLineOf } from '@/lib/transit/walkPaths';
 import { riddenStopCodes } from '@/lib/transit/routeShape';
 import {
@@ -42,6 +43,7 @@ import {
   type PlaceRef,
 } from '@/lib/transit/places';
 import { readUrlState, writeUrlState } from '@/lib/urlState';
+import type { JourneyStep } from '@/lib/transit/journey';
 import { useT } from '@/i18n';
 import { RtlApiError } from '@/api/rtl';
 import type { Itinerary, Place, Stop, WalkLeg } from '@/lib/transit/types';
@@ -140,7 +142,15 @@ export default function App() {
     setDestination(place);
   }, []);
 
-  const { itineraries, liveApplied } = usePlan(graph, origin, destination);
+  /**
+   * The routes of the trip the rider has open, kept live even once the ranking
+   * has stopped offering it — which is exactly what happens when its bus is
+   * missed, and exactly when its times most need to keep moving.
+   */
+  const chosenRoutes = useMemo(() => routeCodesOf(selected ? [selected] : []), [selected]);
+  const { itineraries, liveEtas, liveApplied } = usePlan(graph, origin, destination, {
+    watchRoutes: chosenRoutes,
+  });
 
   useEffect(() => {
     if (origin && destination) {
@@ -184,6 +194,16 @@ export default function App() {
     setView('detail');
     setSnap('half');
   }, [itineraries, liveApplied]);
+
+  const now = useNowMinutes();
+  /**
+   * How far into the chosen trip the rider has actually got, which is what stops
+   * a re-timing from re-planning them onto a bus behind the one they are sitting
+   * on. Held as state rather than read straight off `journey`, because the
+   * journey is built from the re-timed itinerary and so cannot also be an input
+   * to it; it settles a render after a step is completed, which is a frame.
+   */
+  const [reached, setReached] = useState<JourneyPoint>(TRIP_START);
 
   const stops = useMemo(() => (graph ? [...graph.stops.values()] : []), [graph]);
 
@@ -263,19 +283,6 @@ export default function App() {
   }, [view, busLegs]);
 
   /**
-   * The trip detail screen is where a rider sits and waits, so it is the screen
-   * that must not go stale. `selected` is the snapshot they tapped; this finds
-   * the same journey in the current plan, which is the next departure on those
-   * same buses with fresh live ETAs. It falls back to the snapshot when the
-   * journey drops out of the results entirely — losing the screen out from under
-   * someone waiting at the stop would be worse than showing them a stale time.
-   */
-  const activeSelection = useMemo(() => {
-    if (!selected) return null;
-    return findSameJourney(itineraries, itinerarySignature(selected)) ?? selected;
-  }, [selected, itineraries]);
-
-  /**
    * The journey as drawn and quoted, with its walks measured along real
    * footpaths instead of the crow flies.
    *
@@ -283,16 +290,42 @@ export default function App() {
    * options, and asking a shared public router about every walk in every
    * candidate would be both slow and rude. Until the answers land — or if they
    * never do, offline — this is the estimate, unchanged.
+   *
+   * Routed off the snapshot the rider tapped rather than off the re-timed trip
+   * below, because re-timing never moves a stop: the walks are the same walks,
+   * and re-asking the router every time a bus time changed would be traffic
+   * spent on an answer already held.
    */
-  const detail = useMemo(
-    () => (view === 'detail' ? activeSelection : null),
-    [view, activeSelection],
-  );
+  const detail = useMemo(() => (view === 'detail' ? selected : null), [view, selected]);
   const { paths: walkPaths } = useWalkPaths(detail);
-  const walkedDetail = useMemo(
+  const walked = useMemo(
     () => (detail ? applyWalkPaths(detail, walkPaths) : null),
     [detail, walkPaths],
   );
+
+  /**
+   * The trip detail screen is where a rider sits and waits, so it is the screen
+   * that must not go stale: as the minute turns and the ETAs are polled, the
+   * trip they chose is re-timed onto the next departure its buses actually have.
+   * A missed bus therefore moves every time on the screen — when to leave, when
+   * it comes, when they arrive — instead of leaving them reading the times the
+   * screen was opened with.
+   *
+   * The snapshot stands only where re-timing has nothing left to offer: the last
+   * bus of the day has gone. Losing the screen out from under someone waiting at
+   * the stop would be worse than showing them a time that has run out.
+   */
+  const walkedDetail = useMemo(() => {
+    if (!graph || !walked) return walked;
+    return (
+      refreshItinerary(graph, walked, {
+        now,
+        liveEtas,
+        fromLeg: reached.fromLeg,
+        aboard: reached.aboard,
+      }) ?? walked
+    );
+  }, [graph, walked, now, liveEtas, reached]);
 
   /**
    * The journey as it is being travelled, rather than read about.
@@ -327,6 +360,17 @@ export default function App() {
     return points.every((p) => p != null) ? (points as Stop[]) : [];
   }, [graph, journey.step]);
 
+  // Feeds the rider's progress back to the re-timing above, one render behind,
+  // which is what breaks the loop between the two: the journey is built from the
+  // itinerary the point it reports is used to produce.
+  const journeyStep = journey.step;
+  useEffect(() => {
+    setReached((current) => {
+      const next = reachedPoint(journeyStep);
+      return current.fromLeg === next.fromLeg && current.aboard === next.aboard ? current : next;
+    });
+  }, [journeyStep]);
+
   const startJourney = useCallback(() => {
     pendingStep.current = null;
     pendingSince.current = null;
@@ -338,6 +382,10 @@ export default function App() {
   const endJourney = useCallback(() => {
     pendingStep.current = null;
     pendingSince.current = null;
+    // Reset here as well as from the effect above, so the trip chosen next is
+    // re-timed whole from its first render rather than from where the last
+    // journey had got to.
+    setReached(TRIP_START);
     journey.end();
   }, [journey.end]);
 
@@ -605,6 +653,26 @@ export default function App() {
       )}
     </div>
   );
+}
+
+/**
+ * The leg a re-timing should start from, and whether the rider is already on its
+ * bus. See `refreshItinerary`.
+ */
+interface JourneyPoint {
+  fromLeg: number;
+  aboard: boolean;
+}
+
+/** Nothing done yet: the whole trip is still ahead. */
+const TRIP_START: JourneyPoint = { fromLeg: 0, aboard: false };
+/** Past the last leg, so there is nothing left to re-time. */
+const TRIP_DONE: JourneyPoint = { fromLeg: Number.MAX_SAFE_INTEGER, aboard: false };
+
+function reachedPoint(step: JourneyStep | null): JourneyPoint {
+  if (!step) return TRIP_START;
+  if (step.kind === 'arrive') return TRIP_DONE;
+  return { fromLeg: step.legIndex, aboard: step.kind === 'ride' };
 }
 
 function LocateIcon() {

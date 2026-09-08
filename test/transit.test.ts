@@ -17,6 +17,7 @@ import {
   itinerarySignature,
   MAX_WRAP_STOPS,
   planJourney,
+  refreshItinerary,
   totalDistanceM,
 } from '@/lib/transit/plan';
 import {
@@ -721,6 +722,93 @@ describe('following the clock', () => {
     // screen refresh in place instead of freezing on the trip that has gone.
     expect(same).toBeDefined();
     expect(same!.departAt).toBeGreaterThan(early[0].departAt);
+  });
+});
+
+describe('re-timing the trip a rider has chosen', () => {
+  const busLegs = (it: Itinerary) => it.legs.filter((l): l is BusLeg => l.kind === 'bus');
+  const firstBus = (it: Itinerary) => busLegs(it)[0];
+
+  const noon = parseClock('12:00')!;
+  const chosen = planJourney(graph, stopPlace('103'), stopPlace('114'), { departAt: noon })[0];
+
+  it('moves the whole trip onto the next departure once its bus has gone', () => {
+    const missed = firstBus(chosen);
+    const again = refreshItinerary(graph, chosen, { now: missed.departAt + 1 })!;
+    const next = firstBus(again);
+
+    expect(next.departAt).toBeGreaterThan(missed.departAt);
+    expect(again.arriveAt).toBeGreaterThan(chosen.arriveAt);
+    // The same journey, not a replanned one: the rider is still catching that
+    // route at that stop, which is what they chose and where they are standing.
+    expect(next.boardStop.code).toBe(missed.boardStop.code);
+    expect(next.alightStop.code).toBe(missed.alightStop.code);
+    expect(itinerarySignature(again)).toBe(itinerarySignature(chosen));
+  });
+
+  /**
+   * The reported bug, and why matching the chosen trip in the current plan was
+   * not enough on its own. Ranking keeps four options and one per combination of
+   * routes, so a trip whose bus has just left is routinely replaced by the way of
+   * riding that route that walks up it to intercept — and the rider waiting at
+   * their own stop for the next one is then holding a trip the plan no longer
+   * contains, which is what left the screen showing the times it was opened with.
+   */
+  it('keeps re-timing a trip the plan has stopped offering', () => {
+    const trip = planJourney(graph, stopPlace('11201'), stopPlace('1009'), {
+      departAt: parseClock('13:12')!,
+    })[0];
+    const now = firstBus(trip).departAt + 1;
+
+    const replanned = planJourney(graph, stopPlace('11201'), stopPlace('1009'), { departAt: now });
+    expect(findSameJourney(replanned, itinerarySignature(trip))).toBeNull();
+
+    const again = refreshItinerary(graph, trip, { now })!;
+    expect(again.arriveAt).toBeGreaterThan(trip.arriveAt);
+  });
+
+  it('hands back the same object while nothing has moved', () => {
+    // Re-derived every time the minute turns and the ETAs are polled, so a fresh
+    // object each time would redraw the map under a rider who is using it.
+    expect(refreshItinerary(graph, chosen, { now: noon })).toBe(chosen);
+  });
+
+  it('leaves the bus the rider is already aboard exactly where it is', () => {
+    const trip = planJourney(graph, stopPlace('11201'), stopPlace('1009'), { departAt: noon }).find(
+      (it) => busLegs(it).length > 1,
+    )!;
+    const legIndex = trip.legs.indexOf(firstBus(trip));
+
+    // Long past its departure, and long enough that a replan would have put the
+    // rider on the bus behind the one they are sitting on.
+    const aboard = refreshItinerary(graph, trip, {
+      now: firstBus(trip).departAt + 20,
+      fromLeg: legIndex,
+      aboard: true,
+    });
+    expect(aboard).toBe(trip);
+
+    // Missing it instead cascades: the connection it was going to make is judged
+    // on the bus the rider actually catches.
+    const missed = refreshItinerary(graph, trip, { now: firstBus(trip).departAt + 1 })!;
+    expect(busLegs(missed)[1].departAt).toBeGreaterThan(busLegs(trip)[1].departAt);
+  });
+
+  it('does not send a rider standing at the stop back for the walk to it', () => {
+    const trip = planJourney(graph, stopPlace('109'), stopPlace('201'), {
+      departAt: parseClock('14:12')!,
+    }).find((it) => it.legs[0].kind === 'walk' && busLegs(it).length > 0)!;
+    const legIndex = trip.legs.indexOf(firstBus(trip));
+    const now = firstBus(trip).departAt + 1;
+
+    const atStop = refreshItinerary(graph, trip, { now, fromLeg: legIndex })!;
+    const fromHome = refreshItinerary(graph, trip, { now })!;
+    expect(firstBus(atStop).departAt).toBeLessThanOrEqual(firstBus(fromHome).departAt);
+    expect(atStop.legs.length).toBe(trip.legs.length);
+  });
+
+  it('answers with nothing once the last bus of the day has gone', () => {
+    expect(refreshItinerary(graph, chosen, { now: parseClock('23:59')! })).toBeNull();
   });
 });
 

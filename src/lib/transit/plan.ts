@@ -410,6 +410,153 @@ export function findSharedJourney(list: Itinerary[], signature: string): Itinera
   return list.find((it) => destinationsOf(itinerarySignature(it)).join('|') === wanted) ?? null;
 }
 
+/**
+ * How far into a chosen trip the rider has already got.
+ *
+ * Legs before `fromLeg` are behind them and keep the times they were given; the
+ * rest are re-timed from the clock. Defaults to the whole trip, which is what a
+ * rider reading about one rather than making one wants.
+ */
+export interface RefreshOptions {
+  /** Minutes since Malé midnight. */
+  now: number;
+  liveEtas?: LiveEtaIndex;
+  /** Index into `legs` of the first leg still ahead of the rider. */
+  fromLeg?: number;
+  /**
+   * True when the rider is already aboard `fromLeg`'s bus, which is then left
+   * exactly as it is: a bus someone is sitting on cannot be re-planned onto a
+   * later departure of itself, and quoting them the next one would put their
+   * arrival half an hour after they actually get there.
+   */
+  aboard?: boolean;
+}
+
+/**
+ * The chosen journey re-timed against the clock — the same buses, boarded and
+ * left at the same stops, on the next departure each of them actually has.
+ *
+ * A rider who picks a trip is then held to it, and the screen they sit and wait
+ * on is the one that must not go stale. The plan underneath cannot be relied on
+ * to keep offering that trip, though: `dedupe` keeps one itinerary per
+ * combination of routes and the ranking keeps four in all, and the moment a bus
+ * is missed the best way to ride that route is usually to walk up it and
+ * intercept the one that just left — a different journey, boarded at a different
+ * stop. The trip the rider is actually waiting for drops off the list, and a
+ * screen that looks for it there is left showing the times it was opened with.
+ * That is the freeze this exists to prevent.
+ *
+ * So the journey is re-timed directly rather than looked for again: each walk
+ * keeps the length it was measured at, and each bus leg is re-asked of
+ * `earliestTrip` from the moment the rider can be standing at its stop. Null
+ * when one of those buses has no departure left today — the one case where the
+ * times on screen genuinely cannot be improved on.
+ */
+export function refreshItinerary(
+  graph: TransitGraph,
+  itinerary: Itinerary,
+  options: RefreshOptions,
+): Itinerary | null {
+  const from = Math.max(0, options.fromLeg ?? 0);
+  if (from >= itinerary.legs.length) return itinerary;
+
+  const legs = itinerary.legs.slice();
+  let readyAt = options.now;
+  /** Whether a bus has been boarded within the stretch being re-timed. */
+  let ridden = false;
+  let moved = false;
+
+  for (let i = from; i < legs.length; i++) {
+    const leg = legs[i];
+    if (leg.kind === 'walk') {
+      readyAt += leg.seconds / 60;
+      continue;
+    }
+
+    if (i === from && options.aboard) {
+      readyAt = leg.arriveAt;
+      ridden = true;
+      continue;
+    }
+
+    // The transfer buffer is owed to a connection made within this stretch, not
+    // to one the rider has already made: someone standing at the stop having got
+    // off a bus ten minutes ago needs no time to walk across it.
+    const retimed = retimeBusLeg(
+      graph,
+      leg,
+      readyAt + (ridden ? MIN_TRANSFER_MIN : 0),
+      options.liveEtas?.get(leg.route.code),
+    );
+    if (!retimed) return null;
+
+    legs[i] = retimed;
+    moved ||= !sameTiming(leg, retimed);
+    readyAt = retimed.arriveAt;
+    ridden = true;
+  }
+
+  // Identity is load-bearing, as it is in `applyWalkPaths`: this is re-derived
+  // every time the minute turns and every time the ETAs are polled, and a fresh
+  // object each time would redraw the map underneath a rider who is using it.
+  return moved ? finalizeItinerary(legs, itinerary.id) : itinerary;
+}
+
+/** One bus leg on the next departure it has at or after `readyAt`. */
+function retimeBusLeg(
+  graph: TransitGraph,
+  leg: BusLeg,
+  readyAt: number,
+  live?: Map<StopCode, LiveEta>,
+): BusLeg | null {
+  // The graph's own route, so a leg captured before the recorder's measurements
+  // landed is re-timed on them rather than on what it was planned with.
+  const route = graph.routes.get(leg.route.code) ?? leg.route;
+  const boardIndex = route.stops.findIndex((s) => s.stopCode === leg.boardStop.code);
+  const alight = route.stops.findIndex((s) => s.stopCode === leg.alightStop.code);
+  if (boardIndex < 0 || alight < 0) return null;
+  // A ride that closed the loop alights at a stop sitting earlier in the list
+  // than the one it boarded at, exactly as `reconstruct` unwraps it.
+  const alightIndex = alight <= boardIndex ? alight + route.stops.length : alight;
+
+  const trip = earliestTrip(route, boardIndex, readyAt, live?.get(leg.boardStop.code));
+  if (!trip) return null;
+
+  // Standing at the boarding stop, having walked no further to be there: the
+  // walking is already in `readyAt`, and re-counting it would push a frequency
+  // route's modelled wait out by the length of the walk.
+  const standing: Label = {
+    stopCode: leg.boardStop.code,
+    arriveAt: readyAt,
+    round: 0,
+    via: { kind: 'origin', meters: 0, seconds: 0 },
+  };
+  const arrival = arrivalAt(graph, route, trip, boardIndex, alightIndex, standing);
+  if (!arrival) return null;
+
+  return {
+    ...leg,
+    route,
+    departAt: departureAt(trip, boardIndex, standing),
+    arriveAt: arrival.at,
+    estimated: arrival.estimated,
+    liveEta: trip.live,
+  };
+}
+
+/** Whether a re-timed leg says anything the rider has not already been told. */
+function sameTiming(before: BusLeg, after: BusLeg): boolean {
+  return (
+    before.departAt === after.departAt &&
+    before.arriveAt === after.arriveAt &&
+    before.estimated === after.estimated &&
+    // The countdown itself, so a badge reading "in 4 minutes" does not sit there
+    // saying it while the bus arrives.
+    before.liveEta?.minutes === after.liveEta?.minutes &&
+    before.liveEta?.vehicleCode === after.liveEta?.vehicleCode
+  );
+}
+
 function routesTouching(graph: TransitGraph, marked: Set<StopCode>): Set<string> {
   const out = new Set<string>();
   for (const stopCode of marked) {

@@ -6,12 +6,33 @@ import { usePositionEtas } from '@/hooks/usePositionEtas';
 import { useNowMinutes } from '@/hooks/useNowMinutes';
 import { usePageVisible } from '@/hooks/usePageVisible';
 import { usePrefs } from '@/store/prefs';
-import type { Itinerary, Place, TransitGraph } from '@/lib/transit/types';
+import type { Itinerary, LiveEtaIndex, Place, TransitGraph } from '@/lib/transit/types';
 
 export interface PlanResult {
   itineraries: Itinerary[];
+  /**
+   * The arrivals the plan was built on, so a trip the rider has already chosen
+   * can be re-timed on the same readings rather than on the timetable alone —
+   * see `refreshItinerary`. Undefined until something has answered.
+   */
+  liveEtas: LiveEtaIndex | undefined;
   /** True once the live feed has been read, whether or not it had anything. */
   liveApplied: boolean;
+}
+
+export interface UsePlanOptions {
+  /** Pins the search to a chosen time instead of following the wall clock. */
+  departAt?: number;
+  /**
+   * Routes to keep reading live arrivals for whatever the plan offers.
+   *
+   * The ranking keeps four options and one per combination of routes, so the
+   * trip a rider has chosen routinely stops being offered — which is precisely
+   * when they are standing at its stop watching for it. Polling it anyway is
+   * what keeps `refreshItinerary` re-timing that trip on live data rather than
+   * falling back to the timetable at the moment it matters most.
+   */
+  watchRoutes?: readonly string[];
 }
 
 /** Matches StopDetail, so the two views never disagree about the same bus. */
@@ -36,7 +57,7 @@ export function usePlan(
   graph: TransitGraph | undefined,
   origin: Place | null,
   destination: Place | null,
-  departAt?: number,
+  { departAt, watchRoutes }: UsePlanOptions = {},
 ): PlanResult {
   const maxWalkM = usePrefs((s) => s.maxWalkM);
   const walkPreference = usePrefs((s) => s.walkPreference);
@@ -56,7 +77,12 @@ export function usePlan(
     });
   }, [graph, origin, destination, searchFrom, maxWalkM, walkPreference]);
 
-  const routeCodes = useMemo(() => routeCodesOf(scheduled), [scheduled]);
+  const watchKey = watchRoutes?.join(',') ?? '';
+  const routeCodes = useMemo(() => {
+    const codes = new Set(routeCodesOf(scheduled));
+    for (const code of watchKey ? watchKey.split(',') : []) codes.add(code);
+    return [...codes].sort();
+  }, [scheduled, watchKey]);
   /**
    * Keyed on which routes are involved rather than on the itineraries.
    * Replanning on the minute nearly always yields the same handful of routes, so
@@ -110,6 +136,7 @@ export function usePlan(
   // apart from "nothing is running". Either source having answered settles it.
   return {
     itineraries,
+    liveEtas: liveIndex,
     liveApplied: reported !== undefined || derived.size > 0 || routeKey.length === 0,
   };
 }
