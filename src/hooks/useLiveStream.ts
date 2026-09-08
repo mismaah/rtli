@@ -74,13 +74,32 @@ function toTrackedBus(track: StreamTrack): TrackedBus {
 const streamedRoutes = new Set<string>();
 const listeners = new Set<() => void>();
 
+/**
+ * A frozen copy of the above, rebuilt only when it changes.
+ *
+ * `useSyncExternalStore` compares snapshots by identity, so handing it the live
+ * set — which is mutated in place — would report that nothing had happened.
+ */
+const EMPTY_ROUTES: ReadonlySet<string> = new Set();
+let streamedSnapshot: ReadonlySet<string> = EMPTY_ROUTES;
+
 function notify(): void {
+  streamedSnapshot = streamedRoutes.size === 0 ? EMPTY_ROUTES : new Set(streamedRoutes);
   for (const listener of listeners) listener();
 }
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+/** Every route a stream is currently delivering positions for. */
+export function useStreamedRoutes(): ReadonlySet<string> {
+  return useSyncExternalStore(
+    subscribe,
+    () => streamedSnapshot,
+    () => EMPTY_ROUTES,
+  );
 }
 
 /** True while a stream is delivering positions for this route. */

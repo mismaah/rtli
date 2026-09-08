@@ -1,4 +1,4 @@
-import type { LatLng } from '@/lib/geo';
+import { bearingDegrees, type LatLng } from '@/lib/geo';
 import { polylinesOf, type Polyline } from './snapToRoute';
 
 /**
@@ -60,7 +60,7 @@ function metersBetween(a: [number, number], b: [number, number]): number {
   return Math.hypot(dx, dy);
 }
 
-interface Candidate {
+export interface Candidate {
   /** Metres along the line. */
   along: number;
   offsetM: number;
@@ -71,8 +71,16 @@ interface Candidate {
  *
  * A stop the bus passes twice — once each way down the same street — produces
  * two candidates, and it is the caller's job to pick between them.
+ *
+ * `maxOffsetM` is what counts as "close". Stops sit a pavement's width off the
+ * road they are served from; a live bus is wherever its tracker last said, which
+ * is looser, so the two callers do not want the same tolerance.
  */
-function candidatesFor(path: ShapePath, point: LatLng): Candidate[] {
+export function alongCandidates(
+  path: ShapePath,
+  point: LatLng,
+  maxOffsetM: number = MAX_STOP_OFFSET_M,
+): Candidate[] {
   const { line, cumulative } = path;
   const scaleLng = M_PER_DEG_LNG * Math.cos((point.lat * Math.PI) / 180);
   const found: Candidate[] = [];
@@ -94,7 +102,7 @@ function candidatesFor(path: ShapePath, point: LatLng): Candidate[] {
     const py = ay + t * dy;
     const offsetM = Math.hypot(px, py);
 
-    if (offsetM <= MAX_STOP_OFFSET_M) {
+    if (offsetM <= maxOffsetM) {
       // One pass may run close for many segments; only its nearest point counts.
       if (!closest || offsetM < closest.offsetM) {
         closest = { along: cumulative[i - 1] + (cumulative[i] - cumulative[i - 1]) * t, offsetM };
@@ -125,7 +133,7 @@ export function stopOffsets(path: ShapePath, points: readonly LatLng[]): number[
 
   const columns: Candidate[][] = [];
   for (const point of points) {
-    const found = candidatesFor(path, point);
+    const found = alongCandidates(path, point);
     if (found.length === 0) return null;
     // A stop late in the route may be a lap on from where the line first passes
     // it, so each candidate is offered again one full loop further along.
@@ -189,6 +197,32 @@ function pointAt(path: ShapePath, along: number): [number, number] {
     line[low][0] + (line[high][0] - line[low][0]) * t,
     line[low][1] + (line[high][1] - line[low][1]) * t,
   ];
+}
+
+/**
+ * Which way the road runs at a given distance along the line.
+ *
+ * Compass degrees, so it compares directly against the heading inferred for a
+ * live bus. That comparison is the only thing that can tell apart the two
+ * passes a loop makes down the same street — the geometry alone cannot, because
+ * both carriageways are the same handful of metres of line.
+ */
+export function bearingAt(path: ShapePath, along: number): number {
+  const { line, cumulative } = path;
+  const target = Math.max(0, Math.min(path.length, along));
+
+  let low = 0;
+  let high = line.length - 1;
+  while (low < high - 1) {
+    const mid = (low + high) >> 1;
+    if (cumulative[mid] <= target) low = mid;
+    else high = mid;
+  }
+
+  return bearingDegrees(
+    { lat: line[low][1], lng: line[low][0] },
+    { lat: line[high][1], lng: line[high][0] },
+  );
 }
 
 /** The stretch of line between two distances along it, cut exactly at each end. */

@@ -18,7 +18,12 @@ import {
   planJourney,
   totalDistanceM,
 } from '@/lib/transit/plan';
-import { mergeLiveEtas, routeCodesOf, type LiveEtaIndex } from '@/lib/transit/liveOverlay';
+import {
+  mergeLiveEtas,
+  preferEtas,
+  routeCodesOf,
+  type LiveEtaIndex,
+} from '@/lib/transit/liveOverlay';
 import { parseEta } from '@/lib/transit/parseEta';
 import {
   parseClock,
@@ -31,6 +36,7 @@ import {
 import { haversineMeters, bearingDegrees, compassPoint, type LatLng } from '@/lib/geo';
 import {
   updateTracks,
+  type BusTrack,
   isPlausibleFix,
   isStopped,
   MIN_MOVE_M,
@@ -58,7 +64,20 @@ import {
 } from '@/lib/transit/places';
 import { readUrlState, toQueryString, writeUrlState } from '@/lib/urlState';
 import { applyWalkPaths, walkLineOf, walkPathKey } from '@/lib/transit/walkPaths';
-import { riddenShape, riddenStopCodes, shapePath, stopOffsets } from '@/lib/transit/routeShape';
+import {
+  bearingAt,
+  riddenShape,
+  riddenStopCodes,
+  shapePath,
+  stopOffsets,
+} from '@/lib/transit/routeShape';
+import {
+  AT_STOP_M,
+  hourOf,
+  PARKED_AFTER_MS,
+  positionEtas,
+  routeProgress,
+} from '@/lib/transit/positionEta';
 import {
   APPROACH_RADIUS_M,
   ARRIVE_RADIUS_M,
@@ -2011,5 +2030,213 @@ describe('headwayMinutesAt', () => {
     expect(headwayMinutesAt(measured, -60, 15)).toBe(45);
     // And an hour with no measurement still falls back to the route median.
     expect(headwayMinutesAt(measured, 24 * 60 + 14 * 60, 15)).toBe(20);
+  });
+});
+
+/**
+ * Arrivals derived from where the buses are, rather than from RTL's own feed.
+ *
+ * The fixture is R1 with its real geometry, so the distances and the calling
+ * order are the ones the route actually has and a stop's "next bus" is a
+ * question about a real loop rather than a contrived line.
+ */
+describe('estimating arrivals from bus positions', () => {
+  const graph = buildGraph(fixture as RouteDetailsResponse);
+  const r1 = [...graph.routes.values()].find((r) => r.routeNumber === 'R1')!;
+  const shape = roadShapeR1 as GeoJSON.FeatureCollection;
+  const points = r1.stops.map((s) => graph.stops.get(s.stopCode)!);
+  const path = shapePath(shape)!;
+  const NOON = 12 * 60;
+  const progress = routeProgress(r1, path, points, NOON)!;
+  const NOW = Date.parse('2025-01-01T12:00:00+05:00');
+
+  /** The point a given distance along the route's line, as a bus would be snapped to it. */
+  function pointAlong(along: number): LatLng {
+    const target = ((along % path.length) + path.length) % path.length;
+    let i = 1;
+    while (i < path.cumulative.length - 1 && path.cumulative[i] < target) i++;
+    const span = path.cumulative[i] - path.cumulative[i - 1];
+    const t = span === 0 ? 0 : (target - path.cumulative[i - 1]) / span;
+    return {
+      lng: path.line[i - 1][0] + (path.line[i][0] - path.line[i - 1][0]) * t,
+      lat: path.line[i - 1][1] + (path.line[i][1] - path.line[i - 1][1]) * t,
+    };
+  }
+
+  /** A bus on the route's own line, `offsetM` past the stop at `index`. */
+  function busAt(index: number, busCode = 'B1', offsetM = 0): BusTrack {
+    const along = progress.originM + progress.alongM[index] + offsetM;
+    const at = pointAlong(along);
+    return {
+      ...at,
+      busCode,
+      plateNumber: busCode,
+      heading: bearingAt(path, ((along % path.length) + path.length) % path.length),
+      speedMps: 6,
+      movedAt: NOW,
+      updatedAt: NOW,
+      firstSeenAt: NOW,
+      anchor: at,
+      anchorAt: NOW,
+      trail: [],
+    };
+  }
+
+  const read = (tracks: BusTrack[], previous?: Map<string, number>) =>
+    positionEtas(r1, progress, path, tracks, NOON, NOW, previous);
+
+  it('measures the loop in minutes as well as metres', () => {
+    expect(progress.alongM).toHaveLength(r1.stops.length);
+    expect(progress.lapM).toBeCloseTo(path.length, 6);
+    // Forward-running and closing inside a single circuit: a ladder that lapped
+    // itself would put stops behind buses that have not reached them.
+    for (let i = 1; i < progress.alongM.length; i++) {
+      expect(progress.alongM[i]).toBeGreaterThan(progress.alongM[i - 1]);
+      expect(progress.minuteAt[i]).toBeGreaterThan(progress.minuteAt[i - 1]);
+    }
+    expect(progress.alongM[progress.alongM.length - 1]).toBeLessThan(progress.lapM);
+    expect(progress.lapMin).toBeGreaterThan(progress.minuteAt[progress.minuteAt.length - 1]);
+    // R1 publishes a timetable, so none of this rests on an assumed speed.
+    expect(progress.timed).toBe(true);
+    expect(progress.hour).toBe(12);
+  });
+
+  it('quotes a stop the bus approaching it, not the one that just left', () => {
+    // The bug this whole module exists for: RTL reported a stop at 26 minutes
+    // with a bus six metres from it, because it was projecting the bus behind.
+    const justLeft = 4;
+    const { etas } = read([busAt(justLeft, 'GONE', 120)]);
+
+    // The stop it has passed is now most of a lap away, not moments away.
+    const behind = etas.get(r1.stops[justLeft].stopCode)!;
+    expect(behind.minutes).toBeGreaterThan(progress.lapMin / 2);
+    // The stop ahead of it is close.
+    const ahead = etas.get(r1.stops[justLeft + 1].stopCode)!;
+    expect(ahead.minutes).toBeLessThan(behind.minutes);
+  });
+
+  it('keeps a bus a few metres past a stop at that stop', () => {
+    // Snapping is worth metres, so a fix landing just beyond the stop must not
+    // flip the answer from "arriving" to the better part of an hour.
+    const { etas } = read([busAt(3, 'NUDGED', AT_STOP_M / 2)]);
+    const eta = etas.get(r1.stops[3].stopCode)!;
+    expect(eta.minutes).toBe(0);
+    expect(eta.kind).toBe('arriving');
+  });
+
+  it('gives each stop the soonest bus of several', () => {
+    const near = 6;
+    const { etas } = read([busAt(near - 1, 'CLOSE'), busAt(near - 4, 'FURTHER')]);
+    const eta = etas.get(r1.stops[near].stopCode)!;
+
+    expect(eta.vehicleCode).toBe('CLOSE');
+    expect(eta.source).toBe('position');
+    // Stamped against the clock it was read at, which is what the planner uses.
+    expect(eta.expectedAt).toBeGreaterThan(NOON);
+  });
+
+  it('ignores a bus that has been parked for too long', () => {
+    const parked = { ...busAt(2, 'PARKED'), movedAt: NOW - PARKED_AFTER_MS - 1 };
+    expect(read([parked]).etas.size).toBe(0);
+
+    // Stopped at a light is not parked, and must still count.
+    const waiting = { ...busAt(2, 'ATLIGHT'), movedAt: NOW - 60_000 };
+    expect(read([waiting]).etas.size).toBeGreaterThan(0);
+  });
+
+  it('declines to place a bus it cannot tell the direction of', () => {
+    // R1 runs down some streets twice. With no heading and no previous fix
+    // there is nothing to separate the two passes, and they are half a loop
+    // apart — so the bus is left out rather than guessed at.
+    const cemetery = points.findIndex((p) => p.name === "Hulhumale' Cemetery");
+    const blind = { ...busAt(cemetery, 'BLIND'), heading: null };
+    const { etas, placed } = read([blind]);
+
+    expect(placed.has('BLIND')).toBe(false);
+    expect(etas.size).toBe(0);
+  });
+
+  it('holds a headless bus on the pass it was already on', () => {
+    const cemetery = points.findIndex((p) => p.name === "Hulhumale' Cemetery");
+    const seen = read([busAt(cemetery, 'KNOWN')]);
+    expect(seen.placed.get('KNOWN')).toBeDefined();
+
+    const blind = { ...busAt(cemetery, 'KNOWN'), heading: null };
+    const again = read([blind], seen.placed);
+    expect(again.placed.get('KNOWN')).toBeCloseTo(seen.placed.get('KNOWN')!, 0);
+  });
+
+  it('prefers the measured ride for the hour over the pooled one', () => {
+    const key = `${r1.stops[0].stopCode}>${r1.stops[1].stopCode}`;
+    const measured = {
+      headwaySamples: 0,
+      headwayIsLap: false,
+      latenessSamples: 0,
+      segmentMin: { [key]: 4 },
+      segmentMinByHour: { [key]: { '8': 12 } },
+    };
+    const withHistory = { ...r1, measured };
+
+    const pooled = routeProgress(withHistory, path, points, NOON)!;
+    const peak = routeProgress(withHistory, path, points, 8 * 60)!;
+
+    expect(pooled.minuteAt[1]).toBeCloseTo(4, 6);
+    // The same stretch of road, eight minutes longer at the morning peak.
+    expect(peak.minuteAt[1]).toBeCloseTo(12, 6);
+    expect(peak.hour).toBe(8);
+  });
+
+  it('falls back to the pooled median for an hour nothing was measured in', () => {
+    const key = `${r1.stops[0].stopCode}>${r1.stops[1].stopCode}`;
+    const withHistory = {
+      ...r1,
+      measured: {
+        headwaySamples: 0,
+        headwayIsLap: false,
+        latenessSamples: 0,
+        segmentMin: { [key]: 4 },
+        segmentMinByHour: { [key]: { '8': 12 } },
+      },
+    };
+
+    expect(routeProgress(withHistory, path, points, 23 * 60)!.minuteAt[1]).toBeCloseTo(4, 6);
+  });
+
+  it('reads the hour off the Malé clock', () => {
+    expect(hourOf(0)).toBe(0);
+    expect(hourOf(8 * 60 + 59)).toBe(8);
+    expect(hourOf(1440)).toBe(0);
+    expect(hourOf(-30)).toBe(23);
+  });
+});
+
+describe('choosing between the two sources of arrival', () => {
+  const derived: LiveEtaIndex = new Map([
+    ['133', new Map([['A', { minutes: 3, vehicleCode: 'X', kind: 'due' as const, source: 'position' as const }]])],
+  ]);
+  const reported: LiveEtaIndex = new Map([
+    [
+      '133',
+      new Map([
+        ['A', { minutes: 22, vehicleCode: 'Y', kind: 'due' as const }],
+        ['B', { minutes: 9, vehicleCode: 'Z', kind: 'due' as const }],
+      ]),
+    ],
+    ['122', new Map([['C', { minutes: 5, vehicleCode: 'W', kind: 'due' as const }]])],
+  ]);
+
+  it('takes the derived reading per stop and keeps the rest', () => {
+    const merged = preferEtas(derived, reported);
+
+    expect(merged.get('133')!.get('A')!.vehicleCode).toBe('X');
+    // A stop the app could not place a bus for still gets RTL's answer, rather
+    // than losing the whole route because one of its stops was covered.
+    expect(merged.get('133')!.get('B')!.vehicleCode).toBe('Z');
+    expect(merged.get('122')!.get('C')!.minutes).toBe(5);
+  });
+
+  it('passes either side through untouched when the other is empty', () => {
+    expect(preferEtas(new Map(), reported)).toBe(reported);
+    expect(preferEtas(derived, new Map())).toBe(derived);
   });
 });

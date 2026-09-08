@@ -177,3 +177,50 @@ func TestMedian(t *testing.T) {
 		t.Errorf("median of nothing = %v, want 0", got)
 	}
 }
+
+// The same leg is a different ride at the evening peak than it is late at
+// night, and an arrival predicted minutes out is where that difference shows.
+// Hours thin enough to be one bus's evening are withheld, and the pooled median
+// is still served for the consumer to fall back to.
+func TestHistorySplitsSegmentsByHour(t *testing.T) {
+	db := openTest(t)
+
+	var segments []Segment
+	for i := 0; i < MinSamples; i++ {
+		segments = append(segments,
+			Segment{RouteCode: "133", FromStop: "A", ToStop: "B", AtMs: at(1, 7), Secs: 300},
+			Segment{RouteCode: "133", FromStop: "A", ToStop: "B", AtMs: at(1, 23), Secs: 100},
+		)
+	}
+	// One lonely ride in a third hour: a bucket, but not a measurement.
+	segments = append(segments,
+		Segment{RouteCode: "133", FromStop: "A", ToStop: "B", AtMs: at(1, 14), Secs: 999})
+
+	if err := db.ReplaceAggregates(t.Context(), "133", at(2, 0), at(0, 0),
+		nil, segments, nil); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+
+	route := historyOf(t, db).Routes["133"]
+	if route == nil {
+		t.Fatal("no history for 133")
+	}
+
+	byHour := route.SegmentSecsByHour["A>B"]
+	if got := byHour["7"]; got != 300 {
+		t.Errorf("A>B at 07:00 = %v s, want 300", got)
+	}
+	if got := byHour["23"]; got != 100 {
+		t.Errorf("A>B at 23:00 = %v s, want 100", got)
+	}
+	if _, ok := byHour["14"]; ok {
+		t.Errorf("served 14:00 from a single ride: %v", byHour["14"])
+	}
+	// The pooled median still covers every hour that has no bucket of its own.
+	// Eleven rides, so it is the sixth of them and not a blend of the two peaks:
+	// pooling answers "usually", which is exactly why an hourly figure is worth
+	// serving beside it.
+	if got := route.SegmentSecs["A>B"]; got != 300 {
+		t.Errorf("pooled A>B = %v s, want 300", got)
+	}
+}

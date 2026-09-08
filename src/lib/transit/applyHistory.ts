@@ -57,6 +57,19 @@ export function applyHistory(graph: TransitGraph, history: HistorySummary | null
       }
       if (Object.keys(segmentMin).length > 0) attached.segmentMin = segmentMin;
     }
+    if (measured.segmentSecsByHour) {
+      const segmentMinByHour: Record<string, Record<string, number>> = {};
+      for (const [pair, byHour] of Object.entries(measured.segmentSecsByHour)) {
+        const hours: Record<string, number> = {};
+        for (const [hour, secs] of Object.entries(byHour ?? {})) {
+          if (typeof secs === 'number' && secs > 0) hours[hour] = secs / 60;
+        }
+        if (Object.keys(hours).length > 0) segmentMinByHour[pair] = hours;
+      }
+      if (Object.keys(segmentMinByHour).length > 0) {
+        attached.segmentMinByHour = segmentMinByHour;
+      }
+    }
     route.measured = attached;
 
     // The assumed headway is replaced only on the routes that have one — the

@@ -1,7 +1,9 @@
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchStopEtas } from '@/api/rtl';
 import { formatEta, parseEta } from '@/lib/transit/parseEta';
 import { usePageVisible } from '@/hooks/usePageVisible';
+import { usePositionEtas } from '@/hooks/usePositionEtas';
 import { Dv, routeText, stopSecondary, stopText, useT } from '@/i18n';
 import { RouteChip } from '@/components/RouteChip';
 import type { Stop, TransitGraph } from '@/lib/transit/types';
@@ -52,6 +54,32 @@ export function StopDetail({ stop, graph, onClose, onRouteFrom, onRouteTo }: Pro
     staleTime: 0,
   });
 
+  /**
+   * The same board, corrected by where the buses actually are.
+   *
+   * This is the screen the correction matters most on: a rider reading it is
+   * standing at the stop. RTL's row for a route is the arrival of whichever bus
+   * its engine is projecting round the loop, which is routinely not the one
+   * about to pull in — so where the app can place a bus on the route itself, its
+   * own estimate replaces every row RTL offered for that route rather than
+   * sitting beside them. The destination is kept from RTL's row, which is the
+   * one thing on it that was never in doubt.
+   */
+  const derived = usePositionEtas(graph, stop.routes);
+
+  const shown = useMemo(() => {
+    const rows = (arrivals ?? []).filter((a) => !derived.get(a.routeCode)?.has(stop.code));
+
+    for (const [routeCode, byStop] of derived) {
+      const eta = byStop.get(stop.code);
+      if (!eta) continue;
+      const reported = arrivals?.find((a) => a.routeCode === routeCode);
+      rows.push({ routeCode, eta, destination: reported?.destination ?? '' });
+    }
+
+    return rows.sort((a, b) => a.eta.minutes - b.eta.minutes);
+  }, [arrivals, derived, stop.code]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -96,12 +124,12 @@ export function StopDetail({ stop, graph, onClose, onRouteFrom, onRouteTo }: Pro
 
         {isLoading && <p className="text-sm text-ink-500">{t('checkingArrivals')}</p>}
 
-        {!isLoading && (arrivals?.length ?? 0) === 0 && (
+        {!isLoading && shown.length === 0 && (
           <p className="text-sm text-ink-500">{t('noArrivals')}</p>
         )}
 
         <div className="overflow-hidden rounded-xl bg-ink-900">
-          {arrivals?.map((a, i) => {
+          {shown.map((a, i) => {
             const route = graph.routes.get(a.routeCode);
             if (!route) return null;
             return (

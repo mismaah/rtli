@@ -122,6 +122,33 @@ export function mergeLiveEtas(itineraries: Itinerary[], index: LiveEtaIndex): It
   });
 }
 
+/**
+ * Two indexes as one, with `preferred` winning wherever it has an answer.
+ *
+ * Per stop rather than per route: the app's own estimate needs a bus placed on
+ * the route's geometry, so a route can have one for the stops its buses are
+ * approaching and nothing for the rest — a stop behind every bus on a route
+ * running one vehicle, say. Dropping RTL's whole route because one stop was
+ * covered would trade a partly-wrong answer for no answer.
+ */
+export function preferEtas(preferred: LiveEtaIndex, fallback: LiveEtaIndex): LiveEtaIndex {
+  if (preferred.size === 0) return fallback;
+  if (fallback.size === 0) return preferred;
+
+  const merged: LiveEtaIndex = new Map(fallback);
+  for (const [routeCode, byStop] of preferred) {
+    const existing = merged.get(routeCode);
+    if (!existing) {
+      merged.set(routeCode, byStop);
+      continue;
+    }
+    const combined = new Map(existing);
+    for (const [stopCode, eta] of byStop) combined.set(stopCode, eta);
+    merged.set(routeCode, combined);
+  }
+  return merged;
+}
+
 /** Fetch-and-merge in one step, for callers with no separate poll loop. */
 export async function applyLiveEtas(
   itineraries: Itinerary[],

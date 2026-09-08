@@ -79,7 +79,7 @@ counter-intuitive and a fresh session is likely to get them wrong.
 | Per-bus GPS cadence | **~11 s** (median 11.0, tight mode) | **Polling faster returns the same coordinates.** The client's old 10 s poll was already rate-matched. Do not "speed up" polling to get more data — there is none. |
 | Update phasing | Staggered per bus, never synchronised | Why SSE sends per-bus deltas rather than fleet snapshots. |
 | Median movement per update | **64 m** | A 10 s poll at random phase is ~5.5 s stale ≈ 30 m of error. That latency, not the data rate, is what streaming fixes. |
-| ETA change rate | ~once per **30 s** | 10 s cache TTL and 15 s poll lose nothing. |
+| ETA change rate | **Zero** changes in 6.6 min (R2, 17:12–17:19) | The earlier "~once per 30 s" measured the payload jittering, not the ETAs moving: the `vehicleCode` on a row churns while the minutes stay put. The feed is a cumulative offset along the route, not a countdown — see the ETA section in README.md. Cache TTL and poll interval are still fine; just do not read this row as evidence the numbers are live. |
 | Fleet | ~37 buses, 15 routes, 101 stops | The whole problem is small. Over a full day it is **43 distinct buses across 14 routes** — 14 of those buses serve more than one route, so bus→route is not stable and arrival matching must not assume it. The 15th route ran no buses at all that day, which is what `route_activity` exists to record. |
 | Upstream RTT | ~190 ms | Fan-in polling is cheap. |
 | Tolerated rate | 3 req/s sustained, no failures | Fan-in is within what upstream already serves. |

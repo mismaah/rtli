@@ -38,6 +38,12 @@ export interface RouteHistory {
   latenessSamples: number;
   /** Median ride in seconds between adjacent stops, keyed "fromStop>toStop". */
   segmentSecs?: Record<string, number>;
+  /**
+   * The same medians resolved by hour of the Malé day, keyed "fromStop>toStop"
+   * then "0".."23". Sparse: only the buckets with enough observations appear,
+   * and `segmentSecs` above is what a caller falls back to for the rest.
+   */
+  segmentSecsByHour?: Record<string, Record<string, number>>;
 }
 
 export interface HistorySummary {

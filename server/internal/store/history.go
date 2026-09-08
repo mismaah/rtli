@@ -62,6 +62,18 @@ type RouteHistory struct {
 	// stretch through Malé and a stretch of the Hulhumalé link road are not the
 	// same road, and a single km/h figure for the network cannot say so.
 	SegmentSecs map[string]float64 `json:"segmentSecs,omitempty"`
+
+	// SegmentSecsByHour is the same median resolved by hour of the Malé day,
+	// keyed "fromStop>toStop" then "0".."23", for the buckets with enough
+	// observations to mean anything.
+	//
+	// The same road is not the same ride at 08:00 and at 23:00, and a consumer
+	// predicting an arrival minutes out is exactly who that difference is
+	// material to. Sparse by construction: an hour a route barely runs in
+	// simply has no entry, and SegmentSecs above is what the consumer falls
+	// back to. That fallback is why this can be added without weakening
+	// anything — a thin bucket is absent rather than noisy.
+	SegmentSecsByHour map[string]map[string]float64 `json:"segmentSecsByHour,omitempty"`
 }
 
 // History summarises every observation at or after fromMs.
@@ -175,29 +187,38 @@ func (db *DB) History(ctx context.Context, fromMs, nowMs int64) (*HistorySummary
 		r.LatenessSamples = counts[code]
 	}
 
-	// Ride times between adjacent stops. Not split by hour: a stop pair in one
-	// hour on one route is a handful of rides at best, and MinSamples would
-	// reject nearly all of it. Congestion is carried by LatenessByHour instead,
-	// which pools every stop on the route and so has the samples to resolve it.
+	// Ride times between adjacent stops, pooled across the day and again per
+	// hour of it. The pooled figure is the one that is nearly always there; the
+	// hourly one resolves the congestion the pooled figure averages away, on
+	// the routes and hours busy enough to have measured it. Both are served,
+	// because a consumer that finds no bucket for the hour it is asking about
+	// still needs an answer.
 	segments := map[string]map[string][]float64{}
+	segmentsByHour := map[string]map[string]map[int][]float64{}
 	rows, err = db.sql.QueryContext(ctx, `
-		SELECT route_code, from_stop, to_stop, secs
+		SELECT route_code, from_stop, to_stop, hour, secs
 		FROM segment_obs WHERE at_ms >= ?`, fromMs)
 	if err != nil {
 		return nil, fmt.Errorf("history segments: %w", err)
 	}
 	for rows.Next() {
 		var code, from, to string
+		var hour int
 		var secs float64
-		if err := rows.Scan(&code, &from, &to, &secs); err != nil {
+		if err := rows.Scan(&code, &from, &to, &hour, &secs); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("history segments: %w", err)
 		}
 		if segments[code] == nil {
 			segments[code] = map[string][]float64{}
+			segmentsByHour[code] = map[string]map[int][]float64{}
 		}
 		key := from + ">" + to
 		segments[code][key] = append(segments[code][key], secs)
+		if segmentsByHour[code][key] == nil {
+			segmentsByHour[code][key] = map[int][]float64{}
+		}
+		segmentsByHour[code][key][hour] = append(segmentsByHour[code][key][hour], secs)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -205,14 +226,24 @@ func (db *DB) History(ctx context.Context, fromMs, nowMs int64) (*HistorySummary
 	}
 	for code, pairs := range segments {
 		out := map[string]float64{}
+		hourly := map[string]map[string]float64{}
 		for key, values := range pairs {
 			if len(values) < MinSamples {
 				continue
 			}
 			out[key] = round1(median(values))
+			// Only for a pair whose pooled median is already trusted: an hour
+			// resolved off a stop pair the route as a whole barely observed is
+			// precision without accuracy.
+			if byHour := hourlyMedians(segmentsByHour[code][key], 1); byHour != nil {
+				hourly[key] = byHour
+			}
 		}
 		if len(out) > 0 {
 			route(code).SegmentSecs = out
+			if len(hourly) > 0 {
+				route(code).SegmentSecsByHour = hourly
+			}
 		}
 	}
 

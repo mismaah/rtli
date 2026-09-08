@@ -94,6 +94,16 @@ export interface RouteMeasurements {
    * planner adds up.
    */
   segmentMin?: Record<string, number>;
+  /**
+   * The same medians per hour of the Malé day, keyed "fromStop>toStop" then
+   * "0".."23".
+   *
+   * A stretch of road is not the same ride at 08:00 as at 23:00, and an arrival
+   * predicted minutes out is where that difference shows. Sparse by
+   * construction — a thin hour is absent rather than noisy — so `segmentMin` is
+   * always the fallback.
+   */
+  segmentMinByHour?: Record<string, Record<string, number>>;
 }
 
 export interface WalkTransfer {
@@ -129,6 +139,16 @@ export interface Place extends LatLng {
  */
 export type LiveEtaKind = 'arriving' | 'dispatch' | 'due';
 
+/**
+ * Where a reading came from.
+ *
+ * Absent means RTL's own feed, which is the reading this app started with and
+ * still falls back to. `position` means the app worked it out itself, from live
+ * bus positions on the route's geometry and the recorder's measured stop-to-stop
+ * times — see `positionEta.ts` for why that is worth doing.
+ */
+export type LiveEtaSource = 'position';
+
 export interface LiveEta {
   /** Minutes until arrival, or 0 when the bus is pulling in. */
   minutes: number;
@@ -141,6 +161,8 @@ export interface LiveEta {
    * Absent on a reading parsed outside a fetch, such as the stop board's.
    */
   expectedAt?: number;
+  /** How this reading was arrived at. Absent when it came straight from RTL. */
+  source?: LiveEtaSource;
 }
 
 /** Next reported arrival per stop, per route. */

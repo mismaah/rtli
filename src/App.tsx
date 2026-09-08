@@ -22,6 +22,7 @@ import { useTransitGraph } from '@/hooks/useTransitGraph';
 import { useLiveStream } from '@/hooks/useLiveStream';
 import { useGeolocation } from '@/hooks/useGeolocation';
 import { usePlan } from '@/hooks/usePlan';
+import { routeCodesOf } from '@/lib/transit/liveOverlay';
 import { useOnline } from '@/hooks/useOnline';
 import { useWideLayout } from '@/hooks/useWideLayout';
 import { useWalkPaths } from '@/hooks/useWalkPaths';
@@ -230,9 +231,21 @@ export default function App() {
   // One SSE stream for whichever routes are on screen. It writes into the same
   // react-query cache useLiveBuses fills, so BusMarkers and useBoardedBus are
   // unchanged; with no backend, or no stream, they go on polling as before.
+  //
+  // The results list is covered as well as the detail view, because the app now
+  // estimates arrivals from live positions and so wants them for every route it
+  // is offering, not just the one being looked at. Streaming those is what keeps
+  // that free: the server is already polling the whole fleet on everyone's
+  // behalf, where a client left to poll would open one request per route per ten
+  // seconds against a small public service.
   const streamedRoutes = useMemo(
-    () => (view === 'detail' ? busLegs.map((leg) => leg.route.code) : []),
-    [view, busLegs],
+    () =>
+      view === 'detail'
+        ? busLegs.map((leg) => leg.route.code)
+        : view === 'results'
+          ? routeCodesOf(itineraries)
+          : [],
+    [view, busLegs, itineraries],
   );
   useLiveStream(streamedRoutes);
 

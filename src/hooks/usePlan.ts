@@ -1,7 +1,8 @@
 import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { planJourney } from '@/lib/transit/plan';
-import { fetchLiveEtas, routeCodesOf } from '@/lib/transit/liveOverlay';
+import { fetchLiveEtas, preferEtas, routeCodesOf } from '@/lib/transit/liveOverlay';
+import { usePositionEtas } from '@/hooks/usePositionEtas';
 import { useNowMinutes } from '@/hooks/useNowMinutes';
 import { usePageVisible } from '@/hooks/usePageVisible';
 import { usePrefs } from '@/store/prefs';
@@ -64,7 +65,7 @@ export function usePlan(
    */
   const routeKey = routeCodes.join(',');
 
-  const { data: liveIndex } = useQuery({
+  const { data: reported } = useQuery({
     queryKey: ['rtl', 'plan-etas', routeKey],
     queryFn: ({ signal }) => fetchLiveEtas(routeKey.split(','), signal),
     enabled: visible && routeKey.length > 0,
@@ -74,6 +75,19 @@ export function usePlan(
     refetchOnWindowFocus: true,
     staleTime: 0,
   });
+
+  /**
+   * What the app works out for itself from where the buses are, which is the
+   * better answer wherever it has one — RTL's feed cannot say when the *next*
+   * bus reaches a stop, only when the one it happens to be projecting would.
+   * Its own readings stay underneath as the fallback: they still cover the stop
+   * immediately ahead of a bus, and they need neither geometry nor a backend.
+   */
+  const derived = usePositionEtas(graph, routeCodes);
+  const liveIndex = useMemo(
+    () => (reported ? preferEtas(derived, reported) : derived.size > 0 ? derived : undefined),
+    [derived, reported],
+  );
 
   /**
    * Replanned rather than annotated, so a bus the feed puts ten minutes behind
@@ -92,5 +106,10 @@ export function usePlan(
     });
   }, [graph, origin, destination, searchFrom, maxWalkM, walkPreference, scheduled, liveIndex]);
 
-  return { itineraries, liveApplied: liveIndex !== undefined || routeKey.length === 0 };
+  // "The live read has settled", which the screens use to tell "still checking"
+  // apart from "nothing is running". Either source having answered settles it.
+  return {
+    itineraries,
+    liveApplied: reported !== undefined || derived.size > 0 || routeKey.length === 0,
+  };
 }

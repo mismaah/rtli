@@ -10,8 +10,22 @@ import { simplifyLine } from '@/lib/geo';
  */
 export function useRoadShape(routeCode: string | null) {
   return useQuery<GeoJSON.FeatureCollection | null>({
+    ...roadShapeQuery(routeCode),
+    enabled: Boolean(routeCode),
+  });
+}
+
+/**
+ * The query itself, so several routes' shapes can be asked for at once.
+ *
+ * Shared rather than restated: the key and the fetcher have to be identical to
+ * the ones above or a second caller would fill a second cache entry, and a
+ * route's geometry is the largest thing this app downloads.
+ */
+export function roadShapeQuery(routeCode: string | null) {
+  return {
     queryKey: ['rtl', 'roadshape', routeCode],
-    queryFn: async ({ signal }) => {
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
       const res = await fetchRoadShape(routeCode!, signal);
       const shape = res.roadShape;
       if (!shape) return null;
@@ -43,8 +57,7 @@ export function useRoadShape(routeCode: string | null) {
         }),
       };
     },
-    enabled: Boolean(routeCode),
     staleTime: Infinity,
     gcTime: 24 * 60 * 60 * 1000,
-  });
+  };
 }

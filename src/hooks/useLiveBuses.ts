@@ -23,17 +23,30 @@ export function useLiveBuses(routeCode: string | null, enabled = true) {
   // `TrackedBus`, not `LiveBus`: the stream writes into this same key and its
   // positions arrive with the server's own heading and trail attached. A poll's
   // buses simply carry none, which is the shape's optional half.
-  return useQuery<TrackedBus[]>({
+  return useQuery<TrackedBus[]>(liveBusesQuery(routeCode, enabled && visible && !streamed));
+}
+
+/**
+ * The query itself, so several routes' positions can be polled at once.
+ *
+ * `live` folds together every reason not to fetch — the tab is hidden, a stream
+ * already carries this route, the caller has no use for it — because they all
+ * mean the same thing here, and because the cache key is shared with the stream
+ * and with every other caller, so two of them disagreeing about whether to poll
+ * would have one undoing the other's work.
+ */
+export function liveBusesQuery(routeCode: string | null, live: boolean) {
+  return {
     queryKey: ['rtl', 'livecoordinates', routeCode],
-    queryFn: async ({ signal }) => {
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<TrackedBus[]> => {
       const res = await fetchLiveCoordinates(routeCode!, signal);
       return res.busList ?? [];
     },
-    enabled: Boolean(routeCode) && enabled && visible && !streamed,
-    refetchInterval: visible && !streamed ? POLL_MS : false,
+    enabled: Boolean(routeCode) && live,
+    refetchInterval: live ? POLL_MS : (false as const),
     refetchIntervalInBackground: false,
     staleTime: 0,
     gcTime: 0,
     retry: 1,
-  });
+  };
 }

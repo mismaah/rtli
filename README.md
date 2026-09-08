@@ -32,7 +32,7 @@ networks block — the app reports that plainly rather than hanging.
 | `booking/v2/bus/routedetails` | Routes, stops, coordinates and timetables |
 | `booking/v2/bus/roadshape` | GeoJSON geometry for one route |
 | `booking/v1/bus/livecoordinates` | Where each bus is right now |
-| `gps-engine/eta/all-stops-of-route` | Real-time arrivals per stop |
+| `gps-engine/eta/all-stops-of-route` | Arrivals per stop — but see below |
 
 A few things about this data shape the whole app:
 
@@ -101,6 +101,29 @@ the same two buses is not a choice.
 Live ETAs are layered on afterwards, never inside the search: coverage is partial
 (some routes report no buses at all), so the schedule stays the source of truth and
 a missing ETA can never cost you an itinerary.
+
+**RTL's ETA feed cannot say when the next bus reaches a stop, so the app works it
+out itself.** The feed does not report, per stop, the arrival of the bus about to
+pull in. It takes one vehicle and projects it forward around the whole loop,
+handing every stop on the way the time *that* vehicle would reach it — ignoring
+the buses already standing between it and those stops. Measured on R2 across
+fourteen consecutive polls: Flat No. 147 read `23 Minutes` on every one of them
+while the bus that actually served it closed from 2.4 km to 0.5 km, Centro Mall
+read `26 Minutes` with a bus parked six metres away, and the `vehicleCode` beside
+the unchanging 23 cycled through five different buses. The number is a cumulative
+offset along the route, not a countdown.
+
+So [`positionEta.ts`](src/lib/transit/positionEta.ts) derives the arrival instead,
+from three things the app already holds: the route's geometry, the live positions
+snapped onto it, and the median stop-to-stop times the recorder has measured. Every
+bus and every stop goes onto one ruler measured in minutes rather than metres, and
+the next bus at a stop is simply the nearest one behind it. On the same R2 capture
+this counted down 7→3 minutes and put the arrival at 17:20 ± 1 from every one of
+the fourteen independent readings.
+
+RTL's own readings stay underneath as the fallback, per stop rather than per route:
+the head of each of its per-vehicle ladders — the stop immediately ahead of a bus —
+*is* real, and it needs neither route geometry nor a backend to produce.
 
 Walking uses straight-line distance inflated by 1.35 at 1.35 m/s rather than a
 routing API — deterministic, offline and free of rate limits. It's isolated in
