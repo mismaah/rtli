@@ -89,6 +89,16 @@ export interface RouteMeasurements {
   latenessByHour?: Record<string, number>;
   latenessSamples: number;
   /**
+   * Median ride in *minutes* between any two stops of the route, keyed
+   * "fromStop>toStop", measured end to end from one bus's own arrivals.
+   *
+   * Not the legs between it summed: RTL's published times overstate a typical
+   * ride by 16% across the network and by 44% on R2, and this is the figure that
+   * says so. Where it exists it is what a journey is timed on, because it is an
+   * observation of the ride rather than a claim about it.
+   */
+  rideMin?: Record<string, number>;
+  /**
    * Median ride in *minutes* between adjacent stops, keyed "fromStop>toStop".
    * Converted from the seconds the server serves, because minutes are what the
    * planner adds up.

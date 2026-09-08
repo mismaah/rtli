@@ -14,6 +14,28 @@ import (
 // figure is that a thin bucket can be declined rather than silently trusted.
 const MinSamples = 5
 
+// Bounds on a whole ride, from one bus's arrival at one stop to its arrival at
+// another in the same pass.
+const (
+	// MinRideSecs mirrors rollup.MinSegmentSecs: two stops are ~100 m apart at
+	// the tightest and no bus covers that in under ten seconds.
+	MinRideSecs = 10
+
+	// MaxRideSecs bounds a ride at comfortably longer than the longest loop in
+	// the network (R7, ~67 minutes) and far short of a vehicle's shift, so a run
+	// that somehow ran together across a silence cannot be mistaken for a ride.
+	MaxRideSecs = 120 * 60
+
+	// MaxRideGapSecs is the longest silence a single run may contain.
+	//
+	// Generous on purpose: an unobserved arrival in the middle of a pass leaves
+	// a gap of two hops rather than one, and the ride across it is still a real
+	// measurement. What this rejects is a bus that went quiet long enough to
+	// have done something else entirely. A terminal layover does not need to be
+	// caught here — it falls at the repeat that already ends a run.
+	MaxRideGapSecs = 20 * 60
+)
+
 // HistorySummary is what the recorded history says about how the network
 // actually runs, reduced to what a planner can use.
 //
@@ -62,6 +84,24 @@ type RouteHistory struct {
 	// stretch through Malé and a stretch of the Hulhumalé link road are not the
 	// same road, and a single km/h figure for the network cannot say so.
 	SegmentSecs map[string]float64 `json:"segmentSecs,omitempty"`
+
+	// RideSecs is the median time to ride from one stop to another, keyed
+	// "fromStop>toStop" for every ordered pair a bus was observed covering in
+	// one pass — not just adjacent ones.
+	//
+	// This is the figure a journey planner wants, and it is deliberately not the
+	// sum of the SegmentSecs along the way. Summing per-leg medians understates
+	// a typical end-to-end ride, because leg times are right-skewed: a hop is
+	// usually quick and occasionally held, and the median of each leg discards
+	// the holds that any real ride accumulates some of. Measured whole, from one
+	// bus's own arrival at each end, the skew is carried rather than dropped.
+	//
+	// Every ordered pair means ~1,960 entries across the network, which is ~35 KB
+	// of the summary's ~42 KB and by far the largest thing in it. That is worth
+	// it for something fetched once a session and cached, but it is why these are
+	// not also split by hour: the same table per hour would be a payload no
+	// client should be asked to carry.
+	RideSecs map[string]float64 `json:"rideSecs,omitempty"`
 
 	// SegmentSecsByHour is the same median resolved by hour of the Malé day,
 	// keyed "fromStop>toStop" then "0".."23", for the buckets with enough
@@ -247,7 +287,120 @@ func (db *DB) History(ctx context.Context, fromMs, nowMs int64) (*HistorySummary
 		}
 	}
 
+	// Whole rides, from the arrivals themselves rather than from the per-leg
+	// aggregates. Nothing extra is stored for this: stop_arrival already records
+	// which bus reached which stop when, and a run of one bus's arrivals with no
+	// stop repeated is one pass along the route.
+	rides, err := db.rideMedians(ctx, fromMs)
+	if err != nil {
+		return nil, err
+	}
+	for code, medians := range rides {
+		route(code).RideSecs = medians
+	}
+
 	return out, nil
+}
+
+// rideArrival is one bus reaching one stop, which is all a run is made of.
+type rideArrival struct {
+	stopCode string
+	atMs     int64
+}
+
+// rideMedians measures every ride a bus was seen to complete in one pass.
+func (db *DB) rideMedians(ctx context.Context, fromMs int64) (map[string]map[string]float64, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT route_code, bus_code, stop_code, at_ms
+		FROM stop_arrival WHERE at_ms >= ?
+		ORDER BY route_code, bus_code, at_ms`, fromMs)
+	if err != nil {
+		return nil, fmt.Errorf("history rides: %w", err)
+	}
+	defer rows.Close()
+
+	// Grouped by route and then by bus, which is the order the query returns, so
+	// each bus's arrivals arrive already sorted into the runs they belong to.
+	byRoute := map[string]map[string][]rideArrival{}
+	for rows.Next() {
+		var code, bus, stop string
+		var atMs int64
+		if err := rows.Scan(&code, &bus, &stop, &atMs); err != nil {
+			return nil, fmt.Errorf("history rides: %w", err)
+		}
+		if byRoute[code] == nil {
+			byRoute[code] = map[string][]rideArrival{}
+		}
+		byRoute[code][bus] = append(byRoute[code][bus], rideArrival{stopCode: stop, atMs: atMs})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("history rides: %w", err)
+	}
+
+	out := map[string]map[string]float64{}
+	for code, byBus := range byRoute {
+		observed := map[string][]float64{}
+		for _, arrivals := range byBus {
+			collectRides(arrivals, observed)
+		}
+
+		medians := map[string]float64{}
+		for key, values := range observed {
+			if len(values) < MinSamples {
+				continue
+			}
+			medians[key] = round1(median(values))
+		}
+		if len(medians) > 0 {
+			out[code] = medians
+		}
+	}
+	return out, nil
+}
+
+// collectRides splits one bus's arrivals into runs and records every ride each
+// run covers, accumulating into `into`.
+//
+// A run ends where the bus starts round again — the first stop it calls at
+// twice — or where it fell silent for longer than a run can plausibly contain.
+// Splitting on the repeat is what keeps a lap out of the measurements without
+// needing to know the route's stop order at all: a bus that reaches the same
+// stop twice has been round, whatever order the stops are published in.
+//
+// A terminal layover falls between runs rather than inside one, because a route
+// lays over at the end of its loop and that is exactly where the repeat cuts. So
+// these are rides a rider could actually take, not a vehicle's whole shift.
+func collectRides(arrivals []rideArrival, into map[string][]float64) {
+	run := make([]rideArrival, 0, 24)
+
+	flush := func() {
+		for i := 0; i < len(run); i++ {
+			for j := i + 1; j < len(run); j++ {
+				secs := float64(run[j].atMs-run[i].atMs) / 1000
+				if secs < MinRideSecs || secs > MaxRideSecs {
+					continue
+				}
+				key := run[i].stopCode + ">" + run[j].stopCode
+				into[key] = append(into[key], secs)
+			}
+		}
+		run = run[:0]
+	}
+
+	seen := map[string]bool{}
+	for _, arrival := range arrivals {
+		gap := int64(0)
+		if len(run) > 0 {
+			gap = arrival.atMs - run[len(run)-1].atMs
+		}
+		if seen[arrival.stopCode] || gap > MaxRideGapSecs*1000 {
+			flush()
+			seen = map[string]bool{}
+		}
+		seen[arrival.stopCode] = true
+		run = append(run, arrival)
+	}
+	flush()
 }
 
 // hourlyMedians reduces per-hour observations to medians, dropping the hours

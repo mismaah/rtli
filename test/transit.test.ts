@@ -5,6 +5,7 @@ import {
   buildGraph,
   DEFAULT_HEADWAY_MIN,
   estimateRideMinutes,
+  measuredRideMinutes,
   MAX_PLAUSIBLE_BUS_KMH,
   MAX_TRANSFER_WALK_M,
   rideMeters,
@@ -98,7 +99,7 @@ import type { LiveBus } from '@/api/rtl';
 import type { RouteDetailsResponse } from '@/api/rtl';
 import type { HistorySummary } from '@/api/history';
 import { applyHistory, headwayMinutesAt } from '@/lib/transit/applyHistory';
-import type { BusLeg, Itinerary, Place, WalkLeg } from '@/lib/transit/types';
+import type { BusLeg, Itinerary, Place, TransitGraph, WalkLeg } from '@/lib/transit/types';
 import type { WalkPath } from '@/api/walking';
 
 const graph = buildGraph(fixture as unknown as RouteDetailsResponse);
@@ -2238,5 +2239,123 @@ describe('choosing between the two sources of arrival', () => {
   it('passes either side through untouched when the other is empty', () => {
     expect(preferEtas(new Map(), reported)).toBe(reported);
     expect(preferEtas(derived, new Map())).toBe(derived);
+  });
+});
+
+/**
+ * Timing a ride on what it was measured to take, rather than on what RTL
+ * published.
+ *
+ * The recorder times a ride end to end, from one bus's own arrival at each stop.
+ * Across 798 stop pairs the published times overstate a typical ride by 16%,
+ * reaching 44% on R2 and 38% on R6, while understating it on R5 — so the
+ * schedule is the fallback here, not the answer.
+ */
+describe('riding on measured times', () => {
+  const NOON = 12 * 60;
+  const plain = [...buildGraph(fixture as unknown as RouteDetailsResponse).routes.values()].find(
+    (r) => r.routeNumber === 'R1',
+  )!;
+
+  function graphWithRides(rides: Record<string, number>): TransitGraph {
+    const g = buildGraph(fixture as unknown as RouteDetailsResponse);
+    return applyHistory(g, {
+      generatedAtMs: Date.now(),
+      fromMs: 0,
+      routes: {
+        [plain.code]: {
+          headwaySamples: 0,
+          latenessSamples: 0,
+          rideSecs: Object.fromEntries(
+            Object.entries(rides).map(([pair, min]) => [pair, min * 60]),
+          ),
+        },
+      },
+    });
+  }
+
+  const routeOf = (g: TransitGraph) => g.routes.get(plain.code)!;
+
+  /**
+   * The itinerary that rides this stretch, not whichever ranked first.
+   *
+   * Changing a ride's length changes which option wins, so a test comparing
+   * `[0]` across two plans would be comparing two different journeys.
+   */
+  function rideMinutes(g: TransitGraph, fromCode: string, toCode: string): number | null {
+    const from = g.stops.get(fromCode)!;
+    const to = g.stops.get(toCode)!;
+    for (const it of planJourney(g, from, to, { departAt: NOON })) {
+      const bus = it.legs.find(
+        (l): l is BusLeg =>
+          l.kind === 'bus' && l.boardStop.code === fromCode && l.alightStop.code === toCode,
+      );
+      if (bus) return bus.arriveAt - bus.departAt;
+    }
+    return null;
+  }
+
+  it('reads the measured ride for a pair of positions', () => {
+    const from = plain.stops[2].stopCode;
+    const to = plain.stops[6].stopCode;
+
+    const route = routeOf(graphWithRides({ [`${from}>${to}`]: 9 }));
+    expect(measuredRideMinutes(route, 2, 6)).toBe(9);
+    // A pair nothing was measured for leaves the caller with what it had.
+    expect(measuredRideMinutes(route, 3, 7)).toBeNull();
+    // Backwards is not a ride.
+    expect(measuredRideMinutes(route, 6, 2)).toBeNull();
+  });
+
+  it('does not read a lap as a ride', () => {
+    const first = plain.stops[0].stopCode;
+    // Wrapping a whole loop lands back on the boarding stop, and a key naming
+    // the same stop at both ends would be that lap rather than a ride.
+    const route = routeOf(graphWithRides({ [`${first}>${first}`]: 3 }));
+    expect(measuredRideMinutes(route, 0, plain.stops.length)).toBeNull();
+  });
+
+  it('times the ride on the measurement rather than the timetable', () => {
+    const from = plain.stops[2].stopCode;
+    const to = plain.stops[6].stopCode;
+
+    const scheduled = rideMinutes(buildGraph(fixture as unknown as RouteDetailsResponse), from, to);
+    expect(scheduled).not.toBeNull();
+
+    const measured = rideMinutes(graphWithRides({ [`${from}>${to}`]: 1 }), from, to);
+    expect(measured).toBe(1);
+    expect(measured!).toBeLessThan(scheduled!);
+  });
+
+  it('lets the measurement lengthen a ride the timetable was optimistic about', () => {
+    const from = plain.stops[2].stopCode;
+    const to = plain.stops[6].stopCode;
+    const scheduled = rideMinutes(buildGraph(fixture as unknown as RouteDetailsResponse), from, to)!;
+
+    // R5 is the route whose buses are slower than its timetable claims, so the
+    // measurement has to be allowed to say so rather than only ever shorten.
+    expect(rideMinutes(graphWithRides({ [`${from}>${to}`]: scheduled + 5 }), from, to)).toBe(
+      scheduled + 5,
+    );
+  });
+
+  // The measurement is inside the search, not a label on its answer: a stretch
+  // measured slow enough stops being the way to go, and the rider is offered
+  // whatever is genuinely quicker instead.
+  it('reroutes around a stretch measured slow enough to lose', () => {
+    const from = plain.stops[2].stopCode;
+    const to = plain.stops[6].stopCode;
+    const scheduled = rideMinutes(buildGraph(fixture as unknown as RouteDetailsResponse), from, to)!;
+
+    expect(rideMinutes(graphWithRides({ [`${from}>${to}`]: scheduled + 20 }), from, to)).toBeNull();
+  });
+
+  it('leaves a pair it never measured on the published times', () => {
+    const from = plain.stops[2].stopCode;
+    const to = plain.stops[6].stopCode;
+    const elsewhere = `${plain.stops[8].stopCode}>${plain.stops[9].stopCode}`;
+
+    const scheduled = rideMinutes(buildGraph(fixture as unknown as RouteDetailsResponse), from, to);
+    expect(rideMinutes(graphWithRides({ [elsewhere]: 1 }), from, to)).toBe(scheduled);
   });
 });

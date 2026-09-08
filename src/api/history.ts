@@ -39,6 +39,15 @@ export interface RouteHistory {
   /** Median ride in seconds between adjacent stops, keyed "fromStop>toStop". */
   segmentSecs?: Record<string, number>;
   /**
+   * Median seconds to ride from one stop to another, keyed "fromStop>toStop",
+   * for every ordered pair a bus was observed covering in one pass.
+   *
+   * Measured whole rather than summed from the legs between, so it carries what
+   * a rider actually sits through. This is what a journey's ride time is taken
+   * from where it exists; `segmentSecs` remains the per-leg figure.
+   */
+  rideSecs?: Record<string, number>;
+  /**
    * The same medians resolved by hour of the Malé day, keyed "fromStop>toStop"
    * then "0".."23". Sparse: only the buckets with enough observations appear,
    * and `segmentSecs` above is what a caller falls back to for the rest.

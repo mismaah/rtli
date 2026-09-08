@@ -3,6 +3,7 @@ import { headwayMinutesAt } from './applyHistory';
 import {
   DEFAULT_HEADWAY_MIN,
   estimateRideMinutes,
+  measuredRideMinutes,
   rideMeters,
   stopAtPosition,
 } from './buildGraph';
@@ -809,6 +810,14 @@ function arrivalAt(
   const arrive = trip.times[alightIndex];
   if (arrive == null || depart == null || arrive < depart) return null;
 
+  // How long this ride has actually been observed to take, where it has been.
+  // RTL's published times overstate a typical ride by 16% across the network —
+  // 44% on R2, 38% on R6 — and understate it on R5, so the schedule is the
+  // fallback here rather than the answer. Only the *duration* is replaced: the
+  // departure stays the one the timetable or the feed gives, because when the
+  // bus leaves is a different question from how long it then takes.
+  const measured = measuredRideMinutes(route, boardIndex, alightIndex);
+
   // Departure plus how long the ride takes, rather than the arrival time itself,
   // because a few of RTL's legs are timetabled faster than a bus can drive and
   // `Trip.elapsed` has already stretched those to what the road allows. Where
@@ -817,11 +826,14 @@ function arrivalAt(
   // way down the line, and its connections have to be judged on that.
   const from = trip.elapsed[boardIndex];
   const to = trip.elapsed[alightIndex];
-  const ride = from != null && to != null ? to - from : arrive - depart;
+  const scheduled = from != null && to != null ? to - from : arrive - depart;
 
   return {
-    at: departureAt(trip, boardIndex, boardLabel) + ride,
-    estimated: trip.repairsBefore[alightIndex] > trip.repairsBefore[boardIndex],
+    at: departureAt(trip, boardIndex, boardLabel) + (measured ?? scheduled),
+    // A measured ride is an observation of this stretch, so a leg the timetable
+    // had to have repaired is no longer being guessed at and stops being flagged.
+    estimated:
+      measured == null && trip.repairsBefore[alightIndex] > trip.repairsBefore[boardIndex],
   };
 }
 

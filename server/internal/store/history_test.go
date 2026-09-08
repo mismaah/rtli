@@ -224,3 +224,101 @@ func TestHistorySplitsSegmentsByHour(t *testing.T) {
 		t.Errorf("pooled A>B = %v s, want 300", got)
 	}
 }
+
+// A ride is measured whole, from one bus's arrival at each end. The point is
+// that it is not the sum of the legs along the way: leg times are right-skewed,
+// so summing per-leg medians drops the holds every real ride accumulates some of.
+func TestHistoryMeasuresWholeRides(t *testing.T) {
+	db := openTest(t)
+
+	// Five passes, A→B→C. Each leg is usually quick and occasionally held, and
+	// the holds never fall on the same leg twice — so every leg's median is 60 s
+	// while no run actually took 120 s end to end.
+	legs := [][2]int64{{60, 300}, {300, 60}, {60, 60}, {60, 300}, {300, 60}}
+	var arrivals []Arrival
+	for i, pair := range legs {
+		start := at(1, 8) + int64(i)*3_600_000
+		for stop, offset := range map[string]int64{
+			"A": 0, "B": pair[0] * 1000, "C": (pair[0] + pair[1]) * 1000,
+		} {
+			arrivals = append(arrivals, Arrival{
+				RouteCode: "133", StopCode: stop, BusCode: "C1", AtMs: start + offset,
+			})
+		}
+	}
+	if err := db.ReplaceAggregates(t.Context(), "133", at(2, 0), at(0, 0),
+		arrivals, nil, nil); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+
+	route := historyOf(t, db).Routes["133"]
+	if route == nil {
+		t.Fatal("no history for 133")
+	}
+	if got := route.RideSecs["A>B"]; got != 60 {
+		t.Errorf("A>B = %v s, want the leg median 60", got)
+	}
+	if got := route.RideSecs["B>C"]; got != 60 {
+		t.Errorf("B>C = %v s, want the leg median 60", got)
+	}
+	// The whole ride, which no sum of the two legs above would have found.
+	if got := route.RideSecs["A>C"]; got != 360 {
+		t.Errorf("A>C = %v s, want 360 — the legs summed would say 120", got)
+	}
+}
+
+// Going round again is a lap, not a ride. The repeat is what ends a run, which
+// is also why the route's own stop order is never needed here.
+func TestHistoryRideStopsAtTheLap(t *testing.T) {
+	db := openTest(t)
+
+	var arrivals []Arrival
+	for lap := 0; lap < MinSamples; lap++ {
+		start := at(1, 9) + int64(lap)*3_600_000
+		for i, stop := range []string{"A", "B", "A", "B"} {
+			arrivals = append(arrivals, Arrival{
+				RouteCode: "133", StopCode: stop, BusCode: "C1",
+				AtMs: start + int64(i)*60_000,
+			})
+		}
+	}
+	if err := db.ReplaceAggregates(t.Context(), "133", at(2, 0), at(0, 0),
+		arrivals, nil, nil); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+
+	route := historyOf(t, db).Routes["133"]
+	if got := route.RideSecs["A>B"]; got != 60 {
+		t.Errorf("A>B = %v s, want 60 — one hop, not a lap and a hop", got)
+	}
+	// B→A only ever happens by going round, so it is not a ride anyone takes.
+	if _, ok := route.RideSecs["B>A"]; ok {
+		t.Errorf("served B>A, which is a lap: %v", route.RideSecs["B>A"])
+	}
+}
+
+// A bus that fell silent long enough to have done something else did not ride
+// across that silence, so the pair spanning it is not a measurement.
+func TestHistoryRideRejectsLongSilences(t *testing.T) {
+	db := openTest(t)
+
+	var arrivals []Arrival
+	for i := 0; i < MinSamples; i++ {
+		start := at(1, 10) + int64(i)*(4*3_600_000)
+		arrivals = append(arrivals,
+			Arrival{RouteCode: "133", StopCode: "A", BusCode: "C1", AtMs: start},
+			Arrival{RouteCode: "133", StopCode: "B", BusCode: "C1",
+				AtMs: start + (MaxRideGapSecs+60)*1000},
+		)
+	}
+	if err := db.ReplaceAggregates(t.Context(), "133", at(2, 0), at(0, 0),
+		arrivals, nil, nil); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+
+	if route := historyOf(t, db).Routes["133"]; route != nil {
+		if _, ok := route.RideSecs["A>B"]; ok {
+			t.Errorf("served a ride across a %d-minute silence", MaxRideGapSecs/60)
+		}
+	}
+}

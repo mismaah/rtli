@@ -57,6 +57,13 @@ export function applyHistory(graph: TransitGraph, history: HistorySummary | null
       }
       if (Object.keys(segmentMin).length > 0) attached.segmentMin = segmentMin;
     }
+    if (measured.rideSecs) {
+      const rideMin: Record<string, number> = {};
+      for (const [pair, secs] of Object.entries(measured.rideSecs)) {
+        if (typeof secs === 'number' && secs > 0) rideMin[pair] = secs / 60;
+      }
+      if (Object.keys(rideMin).length > 0) attached.rideMin = rideMin;
+    }
     if (measured.segmentSecsByHour) {
       const segmentMinByHour: Record<string, Record<string, number>> = {};
       for (const [pair, byHour] of Object.entries(measured.segmentSecsByHour)) {

@@ -121,6 +121,25 @@ the next bus at a stop is simply the nearest one behind it. On the same R2 captu
 this counted down 7→3 minutes and put the arrival at 17:20 ± 1 from every one of
 the fourteen independent readings.
 
+**Ride times come from measurement too, not the published timetable.** The
+recorder times a ride end to end — one bus's own arrival at each end of it, in a
+single pass — for every pair of stops it has watched enough times to have a
+median. Compared against RTL's own times across 798 stop pairs, the timetable
+overstates a typical ride by **16%**, reaching 44% on R2 and 38% on R6, while
+understating it on R5 by 14%. So the measurement is what a journey is timed on
+and the schedule is the fallback.
+
+Worth noting what this is *not*: summing the per-leg medians instead of measuring
+the ride whole lands within 1.4% of the same answer, so the gap above is not a
+statistical artefact of how the legs were pooled — it is the timetable. Measuring
+whole still earns its place, because it avoids the schedule's habit of
+misattributing time between neighbouring legs (R3 gives one leg 15 minutes and
+the next 3, where reality is 0.9 and 17.0) and because it can answer for pairs
+whose every intermediate leg was never separately observed.
+
+Only the *duration* is replaced. When the bus leaves is a different question, and
+still comes from the timetable or the live feed.
+
 RTL's own readings stay underneath as the fallback, per stop rather than per route:
 the head of each of its per-vehicle ladders — the stop immediately ahead of a bus —
 *is* real, and it needs neither route geometry nor a backend to produce.
