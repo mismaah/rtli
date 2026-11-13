@@ -2,9 +2,15 @@ import { LegTimeline } from '@/components/LegTimeline';
 import { RouteChip } from '@/components/RouteChip';
 import { formatClock, formatDuration } from '@/lib/time';
 import { formatDistance } from '@/lib/geo';
-import { totalDistanceM } from '@/lib/transit/plan';
+import { itineraryEstimateReason, totalDistanceM, type EstimateReason } from '@/lib/transit/plan';
 import { useT } from '@/i18n';
 import type { Itinerary, TransitGraph } from '@/lib/transit/types';
+
+const ESTIMATE_NOTICE = {
+  minibus: 'estimatedNotice',
+  untimed: 'estimatedNoticeUntimed',
+  timetable: 'estimatedNoticeRepaired',
+} as const satisfies Record<EstimateReason, string>;
 
 interface Props {
   itinerary: Itinerary;
@@ -16,6 +22,7 @@ interface Props {
 export function TripDetail({ itinerary, graph, liveApplied, onBack }: Props) {
   const { t } = useT();
   const busLegs = itinerary.legs.filter((l) => l.kind === 'bus');
+  const estimateReason = itineraryEstimateReason(itinerary);
 
   return (
     <div className="space-y-4">
@@ -63,9 +70,9 @@ export function TripDetail({ itinerary, graph, liveApplied, onBack }: Props) {
           </div>
         )}
 
-        {itinerary.estimated && (
+        {estimateReason && (
           <p className="mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-            {t('estimatedNotice')}
+            {t(ESTIMATE_NOTICE[estimateReason])}
           </p>
         )}
         {!liveApplied && (

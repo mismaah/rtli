@@ -14,7 +14,9 @@ import {
   findSameJourney,
   findSharedJourney,
   generalizedCost,
+  itineraryEstimateReason,
   itinerarySignature,
+  legEstimateReason,
   MAX_WRAP_STOPS,
   ARRIVE_BY_WINDOW_MIN,
   planArrivingBy,
@@ -1832,6 +1834,25 @@ describe('planning a day no timetable has been recorded for', () => {
     // opens an hour before it starts.
     const bus = r1Trip.legs.find((l): l is BusLeg => l.kind === 'bus')!;
     expect(Math.floor(bus.departAt / 60)).toBe(7);
+    // R1 is a scheduled route planned without its timetable, not a minibus,
+    // and must not be described to the rider as one.
+    expect(legEstimateReason(bus)).toBe('untimed');
+    expect(itineraryEstimateReason(r1Trip)).toBe('untimed');
+  });
+
+  it('names the reason an estimated leg is one', () => {
+    const g = patternGraph(raw, '2026-11-14', r1Saturdays)!;
+    const options = planArrivingBy(g, stopPlace('103'), stopPlace('114'), {
+      arriveBy: parseClock('08:00')!,
+    });
+    const bus = options
+      .flatMap((it) => it.legs)
+      .find((l): l is BusLeg => l.kind === 'bus' && l.route.code === '133')!;
+    const minibus = { ...bus, route: { ...bus.route, isMiniBus: true } };
+    const timed = { ...bus, route: { ...bus.route, trips: graph.routes.get('133')!.trips } };
+    expect(legEstimateReason(minibus)).toBe('minibus');
+    expect(legEstimateReason(timed)).toBe('timetable');
+    expect(legEstimateReason({ ...timed, estimated: false })).toBeNull();
   });
 
   it('offers no route the recorder has never seen running at that hour of such a day', () => {

@@ -105,10 +105,13 @@ export const en = {
   arrivingNow: 'Arriving now',
   nextIn: 'Next in {n} min',
   estimated: 'Estimated',
-  estimatedTitle:
-    'This route has no published timetable, so times are estimated from typical frequency.',
+  estimatedTitle: 'Some times on this trip are estimated rather than taken from a timetable.',
   estimatedNotice:
     'This trip uses a minibus route with no published timetable. Times are estimated from typical frequency, so treat them as a guide.',
+  estimatedNoticeUntimed:
+    "There's no timetable for this trip's buses, so times are estimated from how often they have run. Treat them as a guide.",
+  estimatedNoticeRepaired:
+    "Part of this trip's published timetable doesn't add up, so some times are estimated. Treat them as a guide.",
   checkingLive: 'Checking for live bus times…',
   allOptions: 'All options',
   startJourney: 'Start journey',

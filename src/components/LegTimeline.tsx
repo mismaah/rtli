@@ -1,6 +1,7 @@
 import { formatClock, formatDuration } from '@/lib/time';
 import { formatDistance } from '@/lib/geo';
 import { formatEta } from '@/lib/transit/parseEta';
+import { legEstimateReason } from '@/lib/transit/plan';
 import { Dv, placeSecondary, placeText, stopSecondary, stopText, routeText, useT } from '@/i18n';
 import type { T } from '@/i18n';
 import type { Itinerary, Leg, TransitGraph } from '@/lib/transit/types';
@@ -86,7 +87,9 @@ export function LegTimeline({
                     </span>
                   )}
                   {leg.estimated && (
-                    <span className="text-amber-300">{t('noTimetableEstimated')}</span>
+                    <span className="text-amber-300">
+                      {t(legEstimateReason(leg) === 'timetable' ? 'estimated' : 'noTimetableEstimated')}
+                    </span>
                   )}
                   {leg.boardBy != null && (
                     <span className="text-amber-300">

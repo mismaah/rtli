@@ -1343,6 +1343,41 @@ export function finalizeItinerary(legs: Leg[], id: string, walkStartAt = 0): Iti
 }
 
 /**
+ * Why a bus leg's times are an estimate, so the rider is told the right thing.
+ *
+ * - `minibus`: one of the frequency minibus routes RTL publishes no times for.
+ * - `untimed`: a scheduled route planned without its timetable — a day ahead
+ *   planned on how its buses have been seen to run, or a route whose timings
+ *   the feed left out. Calling R2 a minibus here would be telling the rider
+ *   something false about which bus to look for.
+ * - `timetable`: a timed route whose published times for this ride did not add
+ *   up and had to be repaired.
+ */
+export type EstimateReason = 'minibus' | 'untimed' | 'timetable';
+
+export function legEstimateReason(leg: BusLeg): EstimateReason | null {
+  if (!leg.estimated) return null;
+  if (leg.route.trips.length > 0) return 'timetable';
+  return leg.route.isMiniBus ? 'minibus' : 'untimed';
+}
+
+/**
+ * The reason to give for an itinerary's estimate as a whole, or null when none
+ * of it is estimated. A route without a timetable outweighs a repaired leg, and
+ * the trip is only called a minibus trip when every untimed leg is one.
+ */
+export function itineraryEstimateReason(it: Itinerary): EstimateReason | null {
+  const reasons = new Set<EstimateReason>();
+  for (const leg of it.legs) {
+    const reason = leg.kind === 'bus' ? legEstimateReason(leg) : null;
+    if (reason) reasons.add(reason);
+  }
+  if (reasons.has('untimed')) return 'untimed';
+  if (reasons.has('minibus')) return 'minibus';
+  return reasons.has('timetable') ? 'timetable' : null;
+}
+
+/**
  * Keeps the best itinerary per combination of routes, and its walk-saving twin.
  *
  * The search naturally finds a dozen near-identical trips down the same routes
