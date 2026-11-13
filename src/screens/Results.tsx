@@ -1,15 +1,19 @@
+import { useState } from 'react';
 import { ItineraryCard } from '@/components/ItineraryCard';
+import { formatClock, minutesOfDay, MINUTES_PER_DAY, parseClock } from '@/lib/time';
 import { usePrefs } from '@/store/prefs';
 import { Dv, placeSecondary, placeText, useT } from '@/i18n';
 import type { T } from '@/i18n';
 import type { WalkPreference } from '@/lib/transit/plan';
-import type { Itinerary, Place, TransitGraph } from '@/lib/transit/types';
+import type { Itinerary, Place, TransitGraph, TripTiming } from '@/lib/transit/types';
 
 interface Props {
   graph: TransitGraph;
   origin: Place;
   destination: Place;
   itineraries: Itinerary[];
+  timing: TripTiming;
+  onTimingChange: (timing: TripTiming) => void;
   loading: boolean;
   onSelect: (itinerary: Itinerary) => void;
   onEditOrigin: () => void;
@@ -23,6 +27,8 @@ export function Results({
   origin,
   destination,
   itineraries,
+  timing,
+  onTimingChange,
   loading,
   onSelect,
   onEditOrigin,
@@ -66,6 +72,8 @@ export function Results({
         />
       </div>
 
+      <TripTimePicker value={timing} onChange={onTimingChange} t={t} />
+
       {itineraries.length > 0 && (
         <WalkPreferencePicker value={walkPreference} onChange={setWalkPreference} t={t} />
       )}
@@ -74,8 +82,19 @@ export function Results({
 
       {!loading && itineraries.length === 0 && (
         <div className="rounded-2xl border border-white/10 bg-ink-800/50 p-6 text-center">
-          <p className="text-sm text-ink-300">{t('noRouteFound')}</p>
-          <p className="mt-2 text-xs text-ink-500">{t('noRouteHint')}</p>
+          {timing.kind === 'arrive' ? (
+            <>
+              <p className="text-sm text-ink-300">
+                {t('noRouteArriveBy', { time: formatClock(timing.at) })}
+              </p>
+              <p className="mt-2 text-xs text-ink-500">{t('noRouteArriveByHint')}</p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-ink-300">{t('noRouteFound')}</p>
+              <p className="mt-2 text-xs text-ink-500">{t('noRouteHint')}</p>
+            </>
+          )}
         </div>
       )}
 
@@ -83,6 +102,134 @@ export function Results({
         <ItineraryCard key={it.id} itinerary={it} onSelect={() => onSelect(it)} />
       ))}
     </div>
+  );
+}
+
+/**
+ * Leave now, leave at a time, or be there by one — collapsed to a single line
+ * that says which, since leaving now is what nearly every search wants and the
+ * controls for the other two would otherwise sit above the results every time.
+ *
+ * Times are today's: the timetable loaded is today's, and a different day's
+ * service is not something this app has to plan with.
+ */
+const TIMING_OPTIONS = [
+  { value: 'now', label: 'timingNow' },
+  { value: 'depart', label: 'timingDepart' },
+  { value: 'arrive', label: 'timingArrive' },
+] as const;
+
+/** How far ahead an arrive-by search starts out, before the rider adjusts it. */
+const DEFAULT_ARRIVE_AHEAD_MIN = 30;
+
+function TripTimePicker({
+  value,
+  onChange,
+  t,
+}: {
+  value: TripTiming;
+  onChange: (next: TripTiming) => void;
+  t: T;
+}) {
+  const [open, setOpen] = useState(false);
+  const pinned = value.kind !== 'now';
+
+  const summary =
+    value.kind === 'depart'
+      ? t('timingDepartAt', { time: formatClock(value.at) })
+      : value.kind === 'arrive'
+        ? t('timingArriveBy', { time: formatClock(value.at) })
+        : t('timingNow');
+
+  const choose = (kind: TripTiming['kind']) => {
+    if (kind === value.kind) return;
+    if (kind === 'now') {
+      onChange({ kind: 'now' });
+      return;
+    }
+    // Switching between the two pinned modes keeps the time already chosen;
+    // coming from "now" starts from the next round five minutes.
+    const now = minutesOfDay();
+    const at = pinned
+      ? value.at
+      : roundUpToFive(kind === 'arrive' ? now + DEFAULT_ARRIVE_AHEAD_MIN : now);
+    onChange({ kind, at });
+  };
+
+  return (
+    <div className="rounded-2xl border border-white/10 bg-ink-800/70 p-1">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className={`flex min-h-11 w-full items-center gap-2 rounded-xl px-3 text-sm active:bg-white/5 ${
+          pinned ? 'font-medium text-brand-400' : 'text-ink-100'
+        }`}
+      >
+        <ClockIcon />
+        <span className="flex-1 text-start tabular-nums">{summary}</span>
+        <svg
+          viewBox="0 0 24 24"
+          className={`size-5 fill-current text-ink-500 transition-transform ${open ? 'rotate-180' : ''}`}
+          aria-hidden
+        >
+          <path d="M7.4 8.6 12 13.2l4.6-4.6L18 10l-6 6-6-6z" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="space-y-2 p-1">
+          <div role="radiogroup" aria-label={t('tripTime')} className="flex gap-1">
+            {TIMING_OPTIONS.map((option) => {
+              const selected = option.value === value.kind;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => choose(option.value)}
+                  className={`min-h-9 flex-1 rounded-full px-3 text-xs font-medium transition-colors ${
+                    selected ? 'bg-brand-500/20 text-brand-400' : 'text-ink-500 active:bg-white/5'
+                  }`}
+                >
+                  {t(option.label)}
+                </button>
+              );
+            })}
+          </div>
+
+          {pinned && (
+            <input
+              type="time"
+              step={60}
+              dir="ltr"
+              aria-label={t('timingTimeLabel')}
+              value={formatClock(value.at)}
+              onChange={(e) => {
+                // A half-typed or cleared field is not a time; keep the last one.
+                const at = parseClock(e.target.value);
+                if (at != null) onChange({ kind: value.kind, at });
+              }}
+              className="min-h-11 w-full rounded-xl border border-white/10 bg-ink-900 px-3 text-base tabular-nums text-ink-100"
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Up to the next multiple of five minutes, kept within today. */
+function roundUpToFive(minutes: number): number {
+  return Math.min(Math.ceil(minutes / 5) * 5, MINUTES_PER_DAY - 1);
+}
+
+function ClockIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="size-4 shrink-0 fill-current" aria-hidden>
+      <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16Zm.5-13H11v6l5.2 3.2.8-1.3-4.5-2.7V7Z" />
+    </svg>
   );
 }
 

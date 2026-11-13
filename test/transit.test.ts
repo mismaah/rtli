@@ -16,6 +16,8 @@ import {
   generalizedCost,
   itinerarySignature,
   MAX_WRAP_STOPS,
+  ARRIVE_BY_WINDOW_MIN,
+  planArrivingBy,
   planJourney,
   refreshItinerary,
   totalDistanceM,
@@ -427,6 +429,9 @@ describe('planJourney', () => {
     expect(results[0].legs).toHaveLength(1);
     expect(results[0].legs[0].kind).toBe('walk');
     expect(results[0].totalFare).toBe(0);
+    // Set off when the search does, not at midnight.
+    expect(results[0].departAt).toBe(noon);
+    expect(results[0].arriveAt).toBeGreaterThan(noon);
   });
 
   it('never chains one walk leg straight into another', () => {
@@ -731,6 +736,112 @@ describe('following the clock', () => {
     // screen refresh in place instead of freezing on the trip that has gone.
     expect(same).toBeDefined();
     expect(same!.departAt).toBeGreaterThan(early[0].departAt);
+  });
+});
+
+describe('arriving by a time', () => {
+  const from = stopPlace('103');
+  const to = stopPlace('602');
+  const deadline = parseClock('13:00')!;
+  const noonish = parseClock('12:10')!;
+  const options = planArrivingBy(graph, from, to, { arriveBy: deadline });
+  const busOptions = options.filter((it) => it.legs.some((l) => l.kind === 'bus'));
+
+  it('offers only trips that make the deadline', () => {
+    expect(busOptions.length).toBeGreaterThan(0);
+    for (const it of options) expect(it.arriveAt).toBeLessThanOrEqual(deadline);
+  });
+
+  it('leaves as late as each journey allows', () => {
+    // The same buses a minute later are the next departure of each, and that
+    // one must miss the deadline — otherwise the rider was told to leave early.
+    for (const it of busOptions) {
+      const next = refreshItinerary(graph, it, { now: it.departAt + 1 });
+      if (next) expect(next.arriveAt).toBeGreaterThan(deadline);
+    }
+  });
+
+  it('finds the trip a forward search would arrive on, leaving no earlier', () => {
+    const forward = planJourney(graph, from, stopPlace('114'), { departAt: parseClock('12:00')! });
+    const trip = forward.find((it) => it.legs.some((l) => l.kind === 'bus'))!;
+    const back = planArrivingBy(graph, from, stopPlace('114'), {
+      arriveBy: Math.ceil(trip.arriveAt),
+      maxResults: 20,
+    });
+    const same = findSameJourney(back, itinerarySignature(trip));
+    expect(same).not.toBeNull();
+    expect(same!.departAt).toBeGreaterThanOrEqual(trip.departAt);
+  });
+
+  it('never sends the rider for a bus that has already left', () => {
+    const notBefore = deadline - 40;
+    for (const it of planArrivingBy(graph, from, to, { arriveBy: deadline, notBefore })) {
+      expect(it.departAt).toBeGreaterThanOrEqual(notBefore);
+    }
+  });
+
+  it('offers nothing when no trip can make it', () => {
+    expect(
+      planArrivingBy(graph, from, to, { arriveBy: deadline, notBefore: deadline - 2 }),
+    ).toEqual([]);
+  });
+
+  it('looks no further back than its window', () => {
+    for (const it of options) {
+      expect(it.departAt).toBeGreaterThanOrEqual(deadline - ARRIVE_BY_WINDOW_MIN);
+    }
+  });
+
+  it('gives back the same trip when re-timed from where its search began', () => {
+    // What holds a trip picked for a chosen time on the detail screen. From its
+    // own departure instead, a minibus leg would have its modelled wait added
+    // twice and slide onto a later bus.
+    for (const it of [
+      ...busOptions,
+      // R15 has no timetable, so this one rides the modelled wait.
+      ...planJourney(graph, stopPlace('101'), stopPlace('1207'), { departAt: noonish }),
+    ]) {
+      const again = refreshItinerary(graph, it, { now: it.plannedFrom! });
+      expect(again!.departAt).toBe(it.departAt);
+      expect(again!.arriveAt).toBe(it.arriveAt);
+    }
+  });
+
+  it('keys every option uniquely, though they come from separate searches', () => {
+    const ids = planArrivingBy(graph, from, to, { arriveBy: deadline, maxResults: 50 }).map(
+      (it) => it.id,
+    );
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('times a walk the whole way to land on the deadline', () => {
+    const near: Place = { name: 'Around the corner', lat: from.lat + 0.002, lng: from.lng };
+    const walk = planArrivingBy(graph, from, near, { arriveBy: deadline }).find(
+      (it) => it.legs.length === 1 && it.legs[0].kind === 'walk',
+    )!;
+    expect(walk.arriveAt).toBeCloseTo(deadline);
+    expect(walk.departAt).toBeLessThan(deadline);
+  });
+
+  it('charges the time from leaving, so the later leaver ranks first', () => {
+    const base: Itinerary = {
+      id: 'x',
+      legs: [],
+      departAt: 0,
+      arriveAt: 0,
+      totalWalkM: 0,
+      totalRideM: 0,
+      transfers: 0,
+      totalFare: 0,
+      estimated: false,
+    };
+    const leavesEarly = { ...base, departAt: 700, arriveAt: 720 };
+    const leavesLate = { ...base, departAt: 730, arriveAt: 755 };
+    expect(generalizedCost(leavesLate, 'balanced', 760)).toBeLessThan(
+      generalizedCost(leavesEarly, 'balanced', 760),
+    );
+    // Leaving now, the earlier arrival is the better trip.
+    expect(generalizedCost(leavesEarly)).toBeLessThan(generalizedCost(leavesLate));
   });
 });
 
@@ -1557,6 +1668,17 @@ describe('url state', () => {
     });
     expect(toQueryString({ to: 'stop:201', step: 'wait-1', since: '720' })).toBe(
       '?to=stop:201&step=wait-1&since=720',
+    );
+  });
+
+  it('carries a chosen departure or arrival time', () => {
+    expect(readUrlState('?from=me&to=stop:201&arrive=17:30')).toEqual({
+      from: 'me',
+      to: 'stop:201',
+      arrive: '17:30',
+    });
+    expect(toQueryString({ from: 'me', to: 'stop:201', depart: '08:05' })).toBe(
+      '?from=me&to=stop:201&depart=08:05',
     );
   });
 

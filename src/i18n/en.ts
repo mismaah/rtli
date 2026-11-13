@@ -71,6 +71,15 @@ export const en = {
   walkBalancedHint: 'Trades walking against time and fare',
   walkMore: 'Fastest',
   walkMoreHint: 'Walk further if it gets you there sooner',
+  tripTime: 'When to travel',
+  timingNow: 'Leave now',
+  timingDepart: 'Depart at',
+  timingArrive: 'Arrive by',
+  timingDepartAt: 'Depart at {time}',
+  timingArriveBy: 'Arrive by {time}',
+  timingTimeLabel: 'Time',
+  noRouteArriveBy: 'Nothing gets there by {time}.',
+  noRouteArriveByHint: 'Try a later arrival time.',
 
   // ---- Itineraries -----------------------------------------------------
   direct: 'Direct',

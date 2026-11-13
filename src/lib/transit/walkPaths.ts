@@ -59,7 +59,7 @@ export function applyWalkPaths(itinerary: Itinerary, paths: Map<string, WalkPath
 
   // Leaving later or arriving earlier than the walk allows is the whole point of
   // measuring it, so the door-to-door times are rebuilt from the new legs.
-  return routed ? finalizeItinerary(legs, itinerary.id) : itinerary;
+  return routed ? finalizeItinerary(legs, itinerary.id, itinerary.departAt) : itinerary;
 }
 
 /** The `[lng, lat]` line to draw for a walk leg: its real path, else the direct line. */

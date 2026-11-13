@@ -15,6 +15,10 @@ export interface UrlState {
   from?: string;
   /** Destination, as encoded by `encodePlace`. */
   to?: string;
+  /** A chosen departure time, `HH:MM` Malé time. Absent when leaving now. */
+  depart?: string;
+  /** A time to arrive by, `HH:MM` Malé time. Wins over `depart` if both appear. */
+  arrive?: string;
   /** The chosen itinerary, as `itinerarySignature` writes it. */
   route?: string;
   /**
@@ -27,7 +31,7 @@ export interface UrlState {
   since?: string;
 }
 
-const KEYS = ['from', 'to', 'route', 'step', 'since'] as const;
+const KEYS = ['from', 'to', 'depart', 'arrive', 'route', 'step', 'since'] as const;
 
 export function readUrlState(search: string = window.location.search): UrlState {
   const params = new URLSearchParams(search);

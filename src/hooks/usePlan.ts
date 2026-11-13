@@ -1,12 +1,18 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { planJourney } from '@/lib/transit/plan';
+import { planArrivingBy, planJourney } from '@/lib/transit/plan';
 import { fetchLiveEtas, preferEtas, routeCodesOf } from '@/lib/transit/liveOverlay';
 import { usePositionEtas } from '@/hooks/usePositionEtas';
 import { useNowMinutes } from '@/hooks/useNowMinutes';
 import { usePageVisible } from '@/hooks/usePageVisible';
 import { usePrefs } from '@/store/prefs';
-import type { Itinerary, LiveEtaIndex, Place, TransitGraph } from '@/lib/transit/types';
+import type {
+  Itinerary,
+  LiveEtaIndex,
+  Place,
+  TransitGraph,
+  TripTiming,
+} from '@/lib/transit/types';
 
 export interface PlanResult {
   itineraries: Itinerary[];
@@ -21,8 +27,11 @@ export interface PlanResult {
 }
 
 export interface UsePlanOptions {
-  /** Pins the search to a chosen time instead of following the wall clock. */
-  departAt?: number;
+  /**
+   * When the rider wants to travel. Leaving now, the default, follows the wall
+   * clock; a chosen departure or arrival pins the search to that time instead.
+   */
+  timing?: TripTiming;
   /**
    * Routes to keep reading live arrivals for whatever the plan offers.
    *
@@ -34,6 +43,8 @@ export interface UsePlanOptions {
    */
   watchRoutes?: readonly string[];
 }
+
+const NOW: TripTiming = { kind: 'now' };
 
 /** Matches StopDetail, so the two views never disagree about the same bus. */
 const POLL_MS = 20_000;
@@ -57,25 +68,40 @@ export function usePlan(
   graph: TransitGraph | undefined,
   origin: Place | null,
   destination: Place | null,
-  { departAt, watchRoutes }: UsePlanOptions = {},
+  { timing = NOW, watchRoutes }: UsePlanOptions = {},
 ): PlanResult {
   const maxWalkM = usePrefs((s) => s.maxWalkM);
   const walkPreference = usePrefs((s) => s.walkPreference);
   const nowMinutes = useNowMinutes();
   const visible = usePageVisible();
 
-  // `departAt` pins the search to a chosen time; without one it follows the
-  // clock, which is what makes the results keep up with the minute.
-  const searchFrom = departAt ?? nowMinutes;
+  // Reduced to plain numbers, so a pinned departure does not replan as the
+  // minute turns — only leaving now follows the clock, which is what makes those
+  // results keep up with it. An arrive-by search follows it too while the
+  // deadline is ahead, so it never offers a trip that has already left.
+  const mode = timing.kind;
+  const at = timing.kind === 'now' ? nowMinutes : timing.at;
+  const notBefore = mode === 'arrive' && at > nowMinutes ? nowMinutes : undefined;
+  /**
+   * A time already gone is a question about the timetable. The feed only knows
+   * the buses running now, and planning on it would put the bus due in five
+   * minutes into a trip asked for two hours ago — it is after that time, so it
+   * looks catchable.
+   */
+  const past = mode !== 'now' && at < nowMinutes;
 
-  const scheduled = useMemo(() => {
-    if (!graph || !origin || !destination) return [];
-    return planJourney(graph, origin, destination, {
-      departAt: searchFrom,
-      maxWalkM,
-      walkPreference,
-    });
-  }, [graph, origin, destination, searchFrom, maxWalkM, walkPreference]);
+  const plan = useCallback(
+    (liveEtas?: LiveEtaIndex): Itinerary[] => {
+      if (!graph || !origin || !destination) return [];
+      const options = { maxWalkM, walkPreference, liveEtas };
+      return mode === 'arrive'
+        ? planArrivingBy(graph, origin, destination, { ...options, arriveBy: at, notBefore })
+        : planJourney(graph, origin, destination, { ...options, departAt: at });
+    },
+    [graph, origin, destination, mode, at, notBefore, maxWalkM, walkPreference],
+  );
+
+  const scheduled = useMemo(() => plan(), [plan]);
 
   const watchKey = watchRoutes?.join(',') ?? '';
   const routeCodes = useMemo(() => {
@@ -121,22 +147,17 @@ export function usePlan(
    * to, the connection that may no longer stand, and the ranking that decides
    * whether this is still the option to show first.
    */
-  const itineraries = useMemo(() => {
-    if (!liveIndex || liveIndex.size === 0) return scheduled;
-    if (!graph || !origin || !destination) return scheduled;
-    return planJourney(graph, origin, destination, {
-      departAt: searchFrom,
-      maxWalkM,
-      walkPreference,
-      liveEtas: liveIndex,
-    });
-  }, [graph, origin, destination, searchFrom, maxWalkM, walkPreference, scheduled, liveIndex]);
+  const liveForPlan = past ? undefined : liveIndex;
+  const itineraries = useMemo(
+    () => (liveForPlan && liveForPlan.size > 0 ? plan(liveForPlan) : scheduled),
+    [plan, scheduled, liveForPlan],
+  );
 
   // "The live read has settled", which the screens use to tell "still checking"
   // apart from "nothing is running". Either source having answered settles it.
   return {
     itineraries,
-    liveEtas: liveIndex,
+    liveEtas: liveForPlan,
     liveApplied: reported !== undefined || derived.size > 0 || routeKey.length === 0,
   };
 }

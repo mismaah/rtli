@@ -42,11 +42,12 @@ import {
   resolvePlaceRef,
   type PlaceRef,
 } from '@/lib/transit/places';
-import { readUrlState, writeUrlState } from '@/lib/urlState';
+import { readUrlState, writeUrlState, type UrlState } from '@/lib/urlState';
 import type { JourneyStep } from '@/lib/transit/journey';
 import { useT } from '@/i18n';
 import { RtlApiError } from '@/api/rtl';
-import type { Itinerary, Place, Stop, WalkLeg } from '@/lib/transit/types';
+import type { Itinerary, Place, Stop, TripTiming, WalkLeg } from '@/lib/transit/types';
+import { formatClock, parseClock } from '@/lib/time';
 
 type View = 'home' | 'results' | 'detail' | 'stop' | 'saved';
 type Searching = 'origin' | 'destination' | 'save' | null;
@@ -109,6 +110,9 @@ export default function App() {
   const pendingStep = useRef<string | null>(initialUrl.step ?? null);
   const pendingSince = useRef<string | null>(initialUrl.since ?? null);
 
+  /** Leaving now, unless the link pinned a departure or an arrival. */
+  const [timing, setTiming] = useState<TripTiming>(() => timingFromUrl(initialUrl));
+
   const locationRefused = geo.status === 'denied' || geo.status === 'unavailable';
 
   useEffect(() => {
@@ -149,6 +153,7 @@ export default function App() {
    */
   const chosenRoutes = useMemo(() => routeCodesOf(selected ? [selected] : []), [selected]);
   const { itineraries, liveEtas, liveApplied } = usePlan(graph, origin, destination, {
+    timing,
     watchRoutes: chosenRoutes,
   });
 
@@ -204,6 +209,8 @@ export default function App() {
    * to it; it settles a render after a step is completed, which is a frame.
    */
   const [reached, setReached] = useState<JourneyPoint>(TRIP_START);
+  /** Whether a journey is under way, held a render behind for the same reason. */
+  const [travelling, setTravelling] = useState(false);
 
   const stops = useMemo(() => (graph ? [...graph.stops.values()] : []), [graph]);
 
@@ -319,13 +326,24 @@ export default function App() {
     if (!graph || !walked) return walked;
     return (
       refreshItinerary(graph, walked, {
-        now,
+        // A trip picked for a chosen time is held to it, as the list it was picked
+        // from is: re-timed from the clock it would slide onto whatever leaves
+        // next. Setting off is what puts it on the clock, since a rider who is
+        // actually travelling needs the bus that is actually coming.
+        //
+        // Held from where its search began, which gives back the same buses; no
+        // later than when it now says to leave, so a routed walk longer than the
+        // estimate moves that earlier rather than the trip onto a later bus.
+        now:
+          timing.kind === 'now' || travelling
+            ? now
+            : Math.min(selected?.plannedFrom ?? walked.departAt, walked.departAt),
         liveEtas,
         fromLeg: reached.fromLeg,
         aboard: reached.aboard,
       }) ?? walked
     );
-  }, [graph, walked, now, liveEtas, reached]);
+  }, [graph, walked, selected, now, liveEtas, reached, timing.kind, travelling]);
 
   /**
    * The journey as it is being travelled, rather than read about.
@@ -371,6 +389,9 @@ export default function App() {
     });
   }, [journeyStep]);
 
+  const journeyActive = journey.active;
+  useEffect(() => setTravelling(journeyActive), [journeyActive]);
+
   const startJourney = useCallback(() => {
     pendingStep.current = null;
     pendingSince.current = null;
@@ -408,6 +429,7 @@ export default function App() {
     writeUrlState({
       from: origin ? encodePlace(origin) : encodeRef(pendingFrom.current),
       to: destination ? encodePlace(destination) : encodeRef(pendingTo.current),
+      ...timingToUrl(timing),
       route:
         view === 'detail' && selected
           ? itinerarySignature(selected)
@@ -417,7 +439,7 @@ export default function App() {
         ? (journey.startedAt?.toString() ?? undefined)
         : (pendingSince.current ?? undefined),
     });
-  }, [origin, destination, selected, view, journey.active, journey.step, journey.startedAt]);
+  }, [origin, destination, timing, selected, view, journey.active, journey.step, journey.startedAt]);
 
   const handlePick = useCallback(
     (place: Place) => {
@@ -578,6 +600,8 @@ export default function App() {
             origin={origin}
             destination={destination}
             itineraries={itineraries}
+            timing={timing}
+            onTimingChange={setTiming}
             loading={false}
             destinationSaved={Boolean(savedDestination)}
             onToggleSaveDestination={toggleSavedDestination}
@@ -687,6 +711,21 @@ function LocateIcon() {
 function minutesFromUrl(raw: string | null): number | null {
   const minutes = Number(raw);
   return raw && Number.isFinite(minutes) && minutes >= 0 && minutes < 1440 ? minutes : null;
+}
+
+/** The trip time a link asked for; an arrival wins over a departure. */
+function timingFromUrl(state: UrlState): TripTiming {
+  const arrive = parseClock(state.arrive);
+  if (arrive != null) return { kind: 'arrive', at: arrive };
+  const depart = parseClock(state.depart);
+  if (depart != null) return { kind: 'depart', at: depart };
+  return { kind: 'now' };
+}
+
+function timingToUrl(timing: TripTiming): Pick<UrlState, 'depart' | 'arrive'> {
+  if (timing.kind === 'depart') return { depart: formatClock(timing.at) };
+  if (timing.kind === 'arrive') return { arrive: formatClock(timing.at) };
+  return {};
 }
 
 /** A place request that has not resolved yet, written back as the URL had it. */

@@ -176,31 +176,161 @@ export function planJourney(
   destination: Place,
   options: PlanOptions,
 ): Itinerary[] {
-  const walkPreference = options.walkPreference ?? DEFAULTS.walkPreference;
+  return rankItineraries(collectCandidates(graph, origin, destination, options), {
+    walkPreference: options.walkPreference ?? DEFAULTS.walkPreference,
+    maxResults: options.maxResults ?? DEFAULTS.maxResults,
+  });
+}
+
+export interface ArriveByOptions extends Omit<PlanOptions, 'departAt'> {
+  /** Minutes since Malé midnight the rider has to be at the destination by. */
+  arriveBy: number;
+  /**
+   * Earliest the rider can set off — the clock, when the deadline is still
+   * ahead — so the answer is never a trip that has already left.
+   */
+  notBefore?: number;
+}
+
+/** How far before the deadline an arrive-by search looks for a way to leave. */
+export const ARRIVE_BY_WINDOW_MIN = 120;
+
+/**
+ * The latest each journey can leave and still be at the destination by
+ * `options.arriveBy`.
+ *
+ * Run as a sweep of ordinary forward searches rather than one search backwards
+ * from the deadline. Each pass takes half a millisecond, and it is everything the
+ * forward search knows about catching a bus — early-running margins, measured
+ * ride times, live arrivals, the loop past the last stop — that a backward search
+ * would have to restate in mirror image, and that `refreshItinerary` would then
+ * have to agree with.
+ *
+ * Every pass finds the next departure of each option from the time it starts,
+ * and starting any later changes nothing until the soonest of those departures
+ * has gone — each is still catchable, and still the earliest arrival where it
+ * lands. So each pass starts a minute after the last one's soonest departure,
+ * and the sweep ends at the first pass with nothing in time: what remains is
+ * the last departure of each option that still makes the deadline.
+ *
+ * Ranked on when the rider has to leave rather than when they arrive — see
+ * `generalizedCost`.
+ */
+export function planArrivingBy(
+  graph: TransitGraph,
+  origin: Place,
+  destination: Place,
+  options: ArriveByOptions,
+): Itinerary[] {
+  const { arriveBy, notBefore } = options;
+  const maxWalkM = options.maxWalkM ?? DEFAULTS.maxWalkM;
+  const earliest = Math.max(arriveBy - ARRIVE_BY_WINDOW_MIN, notBefore ?? -Infinity);
+
+  /** The latest-leaving version of each journey seen, by signature. */
+  const latest = new Map<string, Itinerary>();
+
+  let departAt = earliest;
+  while (departAt <= arriveBy) {
+    let soonest = Infinity;
+    for (const it of collectCandidates(graph, origin, destination, {
+      ...options,
+      departAt,
+      walkOnly: false,
+    })) {
+      if (it.arriveAt > arriveBy) continue;
+      soonest = Math.min(soonest, it.departAt);
+      const key = itinerarySignature(it);
+      const held = latest.get(key);
+      if (
+        !held ||
+        it.departAt > held.departAt ||
+        (it.departAt === held.departAt && it.arriveAt < held.arriveAt)
+      ) {
+        // Keyed by the journey, since the positional ids of separate passes
+        // collide: the same round and alighting stop on different buses.
+        latest.set(key, { ...it, id: key });
+      }
+    }
+    // Leaving later never arrives sooner, so once nothing makes the deadline
+    // nothing after it will either.
+    if (soonest === Infinity) break;
+    departAt = Math.max(departAt + 1, Math.floor(soonest) + 1);
+  }
+
+  const candidates = [...latest.values()];
+  const walkM = walkMeters(origin, destination);
+  if (walkM <= maxWalkM) {
+    const walk = walkOnlyItinerary(origin, destination, walkM, 0);
+    const leaveAt = arriveBy - (walk.arriveAt - walk.departAt);
+    if (notBefore == null || leaveAt >= notBefore) {
+      candidates.push(walkOnlyItinerary(origin, destination, walkM, leaveAt));
+    }
+  }
+
+  return rankItineraries(candidates, {
+    walkPreference: options.walkPreference ?? DEFAULTS.walkPreference,
+    maxResults: options.maxResults ?? DEFAULTS.maxResults,
+    arriveBy,
+  });
+}
+
+/** Walking the whole way, setting off at `departAt`. */
+function walkOnlyItinerary(
+  origin: Place,
+  destination: Place,
+  meters: number,
+  departAt: number,
+): Itinerary {
+  return finalizeItinerary(
+    [{ kind: 'walk', from: origin, to: destination, meters, seconds: walkSeconds(meters) }],
+    'walk-only',
+    departAt,
+  );
+}
+
+interface RankOptions {
+  walkPreference: WalkPreference;
+  maxResults: number;
+  /** Set for an arrive-by search, which ranks on when the rider leaves. */
+  arriveBy?: number;
+}
+
+/** The candidates worth offering, best first. */
+function rankItineraries(candidates: Itinerary[], options: RankOptions): Itinerary[] {
+  const { walkPreference, arriveBy } = options;
+  const cost = (it: Itinerary) => generalizedCost(it, walkPreference, arriveBy);
+  return dedupe(candidates, walkPreference, arriveBy)
+    .sort(
+      (a, b) =>
+        cost(a) - cost(b) ||
+        a.arriveAt - b.arriveAt ||
+        a.totalWalkM - b.totalWalkM ||
+        totalDistanceM(a) - totalDistanceM(b),
+    )
+    .slice(0, options.maxResults);
+}
+
+/**
+ * Every journey one forward search turns up, before any ranking: the walk, if
+ * the destination is in reach, and one per stop and round a bus can drop the
+ * rider at.
+ */
+function collectCandidates(
+  graph: TransitGraph,
+  origin: Place,
+  destination: Place,
+  options: PlanOptions & { walkOnly?: boolean },
+): Itinerary[] {
   const maxWalkM = options.maxWalkM ?? DEFAULTS.maxWalkM;
   const maxTotalWalkM = options.maxTotalWalkM ?? DEFAULTS.maxTotalWalkM;
   const maxRounds = options.maxRounds ?? DEFAULTS.maxRounds;
-  const maxResults = options.maxResults ?? DEFAULTS.maxResults;
 
   const candidates: Itinerary[] = [];
 
   // The destination may simply be close enough to walk to.
   const directWalkM = walkMeters(origin, destination);
-  if (directWalkM <= maxWalkM) {
-    candidates.push(
-      finalizeItinerary(
-        [
-          {
-            kind: 'walk',
-            from: origin,
-            to: destination,
-            meters: directWalkM,
-            seconds: walkSeconds(directWalkM),
-          },
-        ],
-        'walk-only',
-      ),
-    );
+  if (options.walkOnly !== false && directWalkM <= maxWalkM) {
+    candidates.push(walkOnlyItinerary(origin, destination, directWalkM, options.departAt));
   }
 
   // Round 0 — walk from the origin to every stop in range.
@@ -302,15 +432,8 @@ export function planJourney(
     candidates.push(itinerary);
   }
 
-  return dedupe(candidates, walkPreference)
-    .sort(
-      (a, b) =>
-        generalizedCost(a, walkPreference) - generalizedCost(b, walkPreference) ||
-        a.arriveAt - b.arriveAt ||
-        a.totalWalkM - b.totalWalkM ||
-        totalDistanceM(a) - totalDistanceM(b),
-    )
-    .slice(0, maxResults);
+  for (const it of candidates) it.plannedFrom = options.departAt;
+  return candidates;
 }
 
 /**
@@ -324,6 +447,11 @@ export function planJourney(
  * arrival time, and charging for it again would push riders onto a shortcut
  * that is slower, or dearer, or both.
  *
+ * Given `arriveBy`, the time charged is from setting off to the deadline
+ * instead. A rider who has to be somewhere by five is not helped by arriving at
+ * half past four; what they are spending is the time from leaving, so the trip
+ * that lets them leave latest is the one that costs least.
+ *
  * Exported for tests: the weights are the ranking, so they are worth asserting
  * on directly rather than through whichever itineraries a fixture happens to
  * contain.
@@ -331,9 +459,10 @@ export function planJourney(
 export function generalizedCost(
   it: Itinerary,
   walkPreference: WalkPreference = DEFAULTS.walkPreference,
+  arriveBy?: number,
 ): number {
   return (
-    it.arriveAt +
+    (arriveBy == null ? it.arriveAt : arriveBy - it.departAt) +
     (it.totalWalkM / 1000) * WALK_PENALTY_MIN_PER_KM[walkPreference] +
     it.transfers * TRANSFER_PENALTY_MIN +
     it.totalFare * FARE_PENALTY_MIN_PER_MVR +
@@ -1149,7 +1278,7 @@ function placeOf(stop: Stop): Place {
  * when to leave, when you arrive, how far you walk — has to be recomputed from
  * the legs it now has rather than patched.
  */
-export function finalizeItinerary(legs: Leg[], id: string): Itinerary {
+export function finalizeItinerary(legs: Leg[], id: string, walkStartAt = 0): Itinerary {
   const busLegs = legs.filter((l): l is BusLeg => l.kind === 'bus');
   const walkLegs = legs.filter((l): l is WalkLeg => l.kind === 'walk');
 
@@ -1162,12 +1291,14 @@ export function finalizeItinerary(legs: Leg[], id: string): Itinerary {
 
   // Leave in time to be at the stop when the rider has to be, which on a route
   // that runs early is before the bus is due.
+  // With no bus to anchor them, the times are the walk's own from whenever it
+  // starts — which only the caller knows.
   const departAt = firstBus
     ? (firstBus.boardBy ?? firstBus.departAt) - leadingWalkSec / 60
-    : 0;
+    : walkStartAt;
   const arriveAt = lastBus
     ? lastBus.arriveAt + trailingWalkSec / 60
-    : walkLegs.reduce((sum, l) => sum + l.seconds / 60, 0);
+    : walkStartAt + walkLegs.reduce((sum, l) => sum + l.seconds / 60, 0);
 
   return {
     id,
@@ -1196,7 +1327,11 @@ export function finalizeItinerary(legs: Leg[], id: string): Itinerary {
  * one that has just gone is a trade the rider makes — the weights can only guess
  * at it — and both are ranked on their merits from here.
  */
-function dedupe(list: Itinerary[], walkPreference: WalkPreference): Itinerary[] {
+function dedupe(
+  list: Itinerary[],
+  walkPreference: WalkPreference,
+  arriveBy?: number,
+): Itinerary[] {
   const byRouteCombo = new Map<string, Itinerary[]>();
 
   for (const it of list) {
@@ -1211,7 +1346,10 @@ function dedupe(list: Itinerary[], walkPreference: WalkPreference): Itinerary[] 
     else byRouteCombo.set(key, [it]);
   }
 
-  const cost = (it: Itinerary) => generalizedCost(it, walkPreference);
+  const cost = (it: Itinerary) => generalizedCost(it, walkPreference, arriveBy);
+  /** Walking more for no time back: arriving no sooner, or by a deadline, leaving no later. */
+  const noGain = (it: Itinerary, best: Itinerary) =>
+    arriveBy == null ? it.arriveAt >= best.arriveAt : it.departAt <= best.departAt;
   const cheaper = (a: Itinerary, b: Itinerary) => (cost(b) < cost(a) ? b : a);
   const out: Itinerary[] = [];
 
@@ -1225,7 +1363,7 @@ function dedupe(list: Itinerary[], walkPreference: WalkPreference): Itinerary[] 
     const trades = group.filter(
       (it) =>
         Math.abs(it.totalWalkM - best.totalWalkM) >= ALT_BOARDING_WALK_SAVING_M &&
-        !(it.totalWalkM > best.totalWalkM && it.arriveAt >= best.arriveAt),
+        !(it.totalWalkM > best.totalWalkM && noGain(it, best)),
     );
     if (trades.length > 0) out.push(trades.reduce(cheaper));
   }

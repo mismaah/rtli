@@ -262,4 +262,19 @@ export interface Itinerary {
   /** Sum of every boarding's fare, in rufiyaa. */
   totalFare: number;
   estimated: boolean;
+  /**
+   * When the search that found this trip set off from. Re-timing from here gives
+   * back the same trip; re-timing from `departAt` need not, since on a route with
+   * no timetable that already carries a modelled wait, which would be added again.
+   */
+  plannedFrom?: number;
 }
+
+/**
+ * When the rider wants to travel: setting off now, at a chosen time, or so as
+ * to be there by one. Times are minutes since Malé midnight, today.
+ */
+export type TripTiming =
+  | { kind: 'now' }
+  | { kind: 'depart'; at: number }
+  | { kind: 'arrive'; at: number };
