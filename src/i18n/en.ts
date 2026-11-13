@@ -80,6 +80,12 @@ export const en = {
   timingTimeLabel: 'Time',
   noRouteArriveBy: 'Nothing gets there by {time}.',
   noRouteArriveByHint: 'Try a later arrival time.',
+  timingToday: 'Today',
+  timingTomorrow: 'Tomorrow',
+  timingDayLabel: 'Day',
+  otherDayNote: 'Planned from the timetable. Live bus times show on the day.',
+  otherDayStandIn: 'Times are from {date}, the latest recorded day of the same kind.',
+  otherDayUnavailable: "Couldn't load the timetable for that day. Planning ahead needs the RTL Improved server.",
 
   // ---- Itineraries -----------------------------------------------------
   direct: 'Direct',

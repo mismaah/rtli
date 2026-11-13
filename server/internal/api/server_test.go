@@ -16,6 +16,8 @@ import (
 
 	"github.com/mismaah/rtl-improved/server/internal/hub"
 	"github.com/mismaah/rtl-improved/server/internal/rtl"
+	"github.com/mismaah/rtl-improved/server/internal/store"
+	"github.com/mismaah/rtl-improved/server/internal/timetable"
 	"github.com/mismaah/rtl-improved/server/internal/track"
 )
 
@@ -614,6 +616,15 @@ func (stubMerger) Merge(_ context.Context, details rtl.RouteDetails, _ time.Time
 	return out
 }
 
+func (stubMerger) Day(_ context.Context, _ string, details rtl.RouteDetails) (rtl.RouteDetails, timetable.Source, bool) {
+	out := details
+	out.RouteResponse = append([]rtl.Route(nil), details.RouteResponse...)
+	stops := append([]rtl.Stop(nil), out.RouteResponse[0].BusRouteStopList...)
+	stops[0].Timings = []rtl.Timing{{Order: 1, Timing: "06:10:00"}}
+	out.RouteResponse[0].BusRouteStopList = stops
+	return out, timetable.Source{Date: "2026-11-07", Complete: true}, true
+}
+
 // With a timetable book, /v1/graph serves the day so far as well as what is
 // still to come — in the same shape, so the client needs no change to use it.
 func TestGraphServesTheMergedDay(t *testing.T) {
@@ -633,5 +644,62 @@ func TestGraphServesTheMergedDay(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"latitude":"4.169366"`) {
 		t.Error("merging changed the coordinate encoding")
+	}
+}
+
+// Tomorrow's graph is today's routes with that day's departures, and says which
+// captured day those came from.
+func TestGraphServesAnotherDay(t *testing.T) {
+	upstream := newFakeUpstream(t)
+	srv := NewServer(Options{RTL: rtl.NewClient(upstream.server.URL), Timetables: stubMerger{}})
+	front := httptest.NewServer(srv.Handler())
+	t.Cleanup(front.Close)
+
+	tomorrow := time.Now().UTC().Add(store.MaleOffset).AddDate(0, 0, 1).Format(time.DateOnly)
+	res, body := get(t, front.URL+"/v1/graph?date="+tomorrow, nil)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", res.StatusCode, body)
+	}
+	var day DayGraph
+	if err := json.Unmarshal(body, &day); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	timings := day.RouteResponse[0].BusRouteStopList[0].Timings
+	if len(timings) != 1 || timings[0].Timing != "06:10:00" {
+		t.Errorf("timings = %+v, want the day's own 06:10, not today's 16:45", timings)
+	}
+	if day.Timetable.ServiceDate != tomorrow || day.Timetable.From != "2026-11-07" {
+		t.Errorf("timetable = %+v, want %s from 2026-11-07", day.Timetable, tomorrow)
+	}
+}
+
+func TestGraphForDayRejectsWhatItCannotAnswer(t *testing.T) {
+	upstream := newFakeUpstream(t)
+	srv := NewServer(Options{RTL: rtl.NewClient(upstream.server.URL), Timetables: stubMerger{}})
+	front := httptest.NewServer(srv.Handler())
+	t.Cleanup(front.Close)
+
+	for date, want := range map[string]int{
+		"yesterday":  http.StatusBadRequest,
+		"2020-01-01": http.StatusBadRequest,
+		"2099-01-01": http.StatusBadRequest,
+	} {
+		if res, _ := get(t, front.URL+"/v1/graph?date="+date, nil); res.StatusCode != want {
+			t.Errorf("date=%s: status = %d, want %d", date, res.StatusCode, want)
+		}
+	}
+
+	// Within range but nothing captured to stand in for it.
+	plain, _ := newTestServer(t)
+	tomorrow := time.Now().UTC().Add(store.MaleOffset).AddDate(0, 0, 1).Format(time.DateOnly)
+	if res, _ := get(t, plain.URL+"/v1/graph?date="+tomorrow, nil); res.StatusCode != http.StatusNotFound {
+		t.Errorf("no timetable book: status = %d, want 404", res.StatusCode)
+	}
+
+	// Today's date is just the ordinary graph.
+	today := time.Now().UTC().Add(store.MaleOffset).Format(time.DateOnly)
+	res, body := get(t, front.URL+"/v1/graph?date="+today, nil)
+	if res.StatusCode != http.StatusOK || strings.Contains(string(body), `"timetable"`) {
+		t.Errorf("today: status = %d, body carries a day timetable: %v", res.StatusCode, strings.Contains(string(body), `"timetable"`))
 	}
 }

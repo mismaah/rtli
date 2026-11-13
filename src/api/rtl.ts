@@ -177,6 +177,31 @@ export async function fetchRouteDetails(signal?: AbortSignal): Promise<ServedRou
   return { details, via: 'rtl' };
 }
 
+/** Another day's graph: RTL's shape, plus which recorded day its times are from. */
+export interface DayRouteDetails extends RouteDetailsResponse {
+  timetable?: { serviceDate: string; from: string };
+}
+
+/**
+ * The routes with another day's departures, for planning ahead.
+ *
+ * Backend only: RTL publishes nothing but what is left of today, so a day still
+ * to come exists only in the timetable the backend has been recording. Throws
+ * when that cannot be had, which the caller shows rather than falls back from.
+ */
+export async function fetchRouteDetailsForDay(
+  date: string,
+  signal?: AbortSignal,
+): Promise<DayRouteDetails> {
+  const served = await fetchFromBackend<DayRouteDetails>(
+    `/v1/graph?date=${encodeURIComponent(date)}`,
+    signal,
+    { timeoutMs: GRAPH_TIMEOUT_MS },
+  );
+  if (!served) throw new Error(`no timetable for ${date}`);
+  return served;
+}
+
 /** Route geometry. The backend's copy arrives already simplified. */
 export async function fetchRoadShape(
   routeCode: string,

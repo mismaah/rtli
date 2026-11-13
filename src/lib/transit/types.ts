@@ -272,9 +272,10 @@ export interface Itinerary {
 
 /**
  * When the rider wants to travel: setting off now, at a chosen time, or so as
- * to be there by one. Times are minutes since Malé midnight, today.
+ * to be there by one. Times are minutes since Malé midnight on `date`, a Malé
+ * `YYYY-MM-DD` that is absent for today.
  */
 export type TripTiming =
   | { kind: 'now' }
-  | { kind: 'depart'; at: number }
-  | { kind: 'arrive'; at: number };
+  | { kind: 'depart'; at: number; date?: string }
+  | { kind: 'arrive'; at: number; date?: string };

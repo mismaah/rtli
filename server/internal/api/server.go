@@ -24,6 +24,7 @@ import (
 	"github.com/mismaah/rtl-improved/server/internal/logbuf"
 	"github.com/mismaah/rtl-improved/server/internal/rtl"
 	"github.com/mismaah/rtl-improved/server/internal/store"
+	"github.com/mismaah/rtl-improved/server/internal/timetable"
 	"github.com/mismaah/rtl-improved/server/internal/track"
 )
 
@@ -112,6 +113,9 @@ type Server struct {
 // timetable. Satisfied by *timetable.Book.
 type TimetableMerger interface {
 	Merge(ctx context.Context, details rtl.RouteDetails, at time.Time) rtl.RouteDetails
+	// Day returns details carrying another service date's whole timetable,
+	// and which captured day it came from. See timetable.Book.Day.
+	Day(ctx context.Context, serviceDate string, details rtl.RouteDetails) (rtl.RouteDetails, timetable.Source, bool)
 }
 
 // LiveTracks is the poller's read side, kept as an interface so the API package
@@ -296,6 +300,10 @@ const graphKey = "routedetails"
 // the single normalizer, so the server and the client's direct-to-RTL fallback
 // can never disagree about what a route is.
 func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
+	if date := r.URL.Query().Get("date"); date != "" && date != maleToday(time.Now()) {
+		s.handleGraphForDay(w, r, date)
+		return
+	}
 	payload, err := s.graphPayload(r.Context())
 	if err != nil {
 		s.fail(w, r, "graph", err)

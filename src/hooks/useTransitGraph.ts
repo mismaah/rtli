@@ -1,11 +1,12 @@
 import { useQuery } from '@tanstack/react-query';
-import { fetchRouteDetails, type Via } from '@/api/rtl';
+import { fetchRouteDetails, fetchRouteDetailsForDay, type Via } from '@/api/rtl';
 import { backendWorthAsking, COOLDOWN_MS } from '@/api/backend';
 import { fetchHistory } from '@/api/history';
 import { applyHistory } from '@/lib/transit/applyHistory';
 import { buildGraph } from '@/lib/transit/buildGraph';
 import { loadOfflineRouteDetails, mergeWithStoredTimetable } from '@/lib/timetableCache';
 import type { TransitGraph } from '@/lib/transit/types';
+import { MALE_UTC_OFFSET_MIN } from '@/lib/time';
 
 export const TRANSIT_GRAPH_KEY = ['rtl', 'routedetails'] as const;
 
@@ -129,5 +130,42 @@ export function useTransitGraph() {
     retry: 2,
     refetchInterval: ({ state }) => nextRecheckDelay(state.data, state.dataUpdateCount),
     refetchIntervalInBackground: false,
+  });
+}
+
+export interface DayGraphResult {
+  graph: TransitGraph;
+  /**
+   * The recorded day the times were taken from, when it is not the day itself —
+   * which for a day still to come it always is, since nothing has seen it yet.
+   */
+  standInFrom: string | null;
+}
+
+/**
+ * The graph for another day, for planning ahead; idle while `date` is null.
+ *
+ * Today's graph stays the one the map, the stops and live tracking use. This is
+ * only what that day's trips are planned on, with that day's measurements laid
+ * over it — a Friday is planned on Friday's waits, not Thursday's.
+ */
+export function useDayGraph(date: string | null) {
+  return useQuery<DayGraphResult>({
+    queryKey: [...TRANSIT_GRAPH_KEY, 'day', date],
+    enabled: date != null,
+    queryFn: async ({ signal }) => {
+      const details = await fetchRouteDetailsForDay(date!, signal);
+      const history = await fetchHistory(signal);
+      // Midday Malé time on that date, so the graph is stamped with its day.
+      const midday = new Date(Date.parse(`${date}T12:00:00Z`) - MALE_UTC_OFFSET_MIN * 60_000);
+      const from = details.timetable?.from;
+      return {
+        graph: applyHistory(buildGraph(details, midday), history),
+        standInFrom: from && from !== date ? from : null,
+      };
+    },
+    staleTime: 30 * 60 * 1000,
+    gcTime: 24 * 60 * 60 * 1000,
+    retry: 1,
   });
 }

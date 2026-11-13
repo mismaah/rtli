@@ -33,6 +33,12 @@ export interface UsePlanOptions {
    */
   timing?: TripTiming;
   /**
+   * True when `timing` is on a day other than today, and `graph` is that day's.
+   * Such a plan is the timetable's alone: the clock and the live feed are both
+   * about today.
+   */
+  otherDay?: boolean;
+  /**
    * Routes to keep reading live arrivals for whatever the plan offers.
    *
    * The ranking keeps four options and one per combination of routes, so the
@@ -68,7 +74,7 @@ export function usePlan(
   graph: TransitGraph | undefined,
   origin: Place | null,
   destination: Place | null,
-  { timing = NOW, watchRoutes }: UsePlanOptions = {},
+  { timing = NOW, otherDay = false, watchRoutes }: UsePlanOptions = {},
 ): PlanResult {
   const maxWalkM = usePrefs((s) => s.maxWalkM);
   const walkPreference = usePrefs((s) => s.walkPreference);
@@ -81,7 +87,8 @@ export function usePlan(
   // deadline is ahead, so it never offers a trip that has already left.
   const mode = timing.kind;
   const at = timing.kind === 'now' ? nowMinutes : timing.at;
-  const notBefore = mode === 'arrive' && at > nowMinutes ? nowMinutes : undefined;
+  const notBefore =
+    mode === 'arrive' && !otherDay && at > nowMinutes ? nowMinutes : undefined;
   /**
    * A time already gone is a question about the timetable. The feed only knows
    * the buses running now, and planning on it would put the bus due in five
@@ -89,6 +96,7 @@ export function usePlan(
    * looks catchable.
    */
   const past = mode !== 'now' && at < nowMinutes;
+  const timetableOnly = past || otherDay;
 
   const plan = useCallback(
     (liveEtas?: LiveEtaIndex): Itinerary[] => {
@@ -105,10 +113,12 @@ export function usePlan(
 
   const watchKey = watchRoutes?.join(',') ?? '';
   const routeCodes = useMemo(() => {
+    // Nothing to poll for a day the feed knows nothing about.
+    if (otherDay) return [];
     const codes = new Set(routeCodesOf(scheduled));
     for (const code of watchKey ? watchKey.split(',') : []) codes.add(code);
     return [...codes].sort();
-  }, [scheduled, watchKey]);
+  }, [scheduled, watchKey, otherDay]);
   /**
    * Keyed on which routes are involved rather than on the itineraries.
    * Replanning on the minute nearly always yields the same handful of routes, so
@@ -147,7 +157,7 @@ export function usePlan(
    * to, the connection that may no longer stand, and the ranking that decides
    * whether this is still the option to show first.
    */
-  const liveForPlan = past ? undefined : liveIndex;
+  const liveForPlan = timetableOnly ? undefined : liveIndex;
   const itineraries = useMemo(
     () => (liveForPlan && liveForPlan.size > 0 ? plan(liveForPlan) : scheduled),
     [plan, scheduled, liveForPlan],

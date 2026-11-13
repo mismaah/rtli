@@ -1,9 +1,16 @@
 import { useState } from 'react';
 import { ItineraryCard } from '@/components/ItineraryCard';
-import { formatClock, minutesOfDay, MINUTES_PER_DAY, parseClock } from '@/lib/time';
+import { formatClock, minutesOfDay, parseClock } from '@/lib/time';
+import {
+  addDays,
+  chooseDay,
+  chooseMode,
+  chooseTime,
+  PLAN_AHEAD_DAYS,
+} from '@/lib/tripTiming';
 import { usePrefs } from '@/store/prefs';
 import { Dv, placeSecondary, placeText, useT } from '@/i18n';
-import type { T } from '@/i18n';
+import type { Language, T } from '@/i18n';
 import type { WalkPreference } from '@/lib/transit/plan';
 import type { Itinerary, Place, TransitGraph, TripTiming } from '@/lib/transit/types';
 
@@ -14,7 +21,13 @@ interface Props {
   itineraries: Itinerary[];
   timing: TripTiming;
   onTimingChange: (timing: TripTiming) => void;
+  /** Today's Malé date, `YYYY-MM-DD`. */
+  today: string;
   loading: boolean;
+  /** The timetable for the chosen day could not be had. */
+  dayUnavailable?: boolean;
+  /** The recorded day another day's plan is standing in for it with. */
+  standInFrom?: string | null;
   onSelect: (itinerary: Itinerary) => void;
   onEditOrigin: () => void;
   onEditDestination: () => void;
@@ -29,7 +42,10 @@ export function Results({
   itineraries,
   timing,
   onTimingChange,
+  today,
   loading,
+  dayUnavailable = false,
+  standInFrom = null,
   onSelect,
   onEditOrigin,
   onEditDestination,
@@ -39,6 +55,7 @@ export function Results({
   const walkPreference = usePrefs((s) => s.walkPreference);
   const setWalkPreference = usePrefs((s) => s.setWalkPreference);
   const { t, lang } = useT();
+  const otherDay = timing.kind !== 'now' && timing.date != null && timing.date !== today;
 
   return (
     <div className="space-y-4">
@@ -72,7 +89,21 @@ export function Results({
         />
       </div>
 
-      <TripTimePicker value={timing} onChange={onTimingChange} t={t} />
+      <TripTimePicker
+        value={timing}
+        onChange={onTimingChange}
+        today={today}
+        t={t}
+        lang={lang}
+      />
+
+      {otherDay && !dayUnavailable && (
+        <p className="px-1 text-xs text-ink-500">
+          {t('otherDayNote')}
+          {standInFrom &&
+            ` ${t('otherDayStandIn', { date: formatDay(standInFrom, lang) })}`}
+        </p>
+      )}
 
       {itineraries.length > 0 && (
         <WalkPreferencePicker value={walkPreference} onChange={setWalkPreference} t={t} />
@@ -80,7 +111,13 @@ export function Results({
 
       {loading && <SkeletonList />}
 
-      {!loading && itineraries.length === 0 && (
+      {dayUnavailable && (
+        <div className="rounded-2xl border border-white/10 bg-ink-800/50 p-6 text-center">
+          <p className="text-sm text-ink-300">{t('otherDayUnavailable')}</p>
+        </div>
+      )}
+
+      {!loading && !dayUnavailable && itineraries.length === 0 && (
         <div className="rounded-2xl border border-white/10 bg-ink-800/50 p-6 text-center">
           {timing.kind === 'arrive' ? (
             <>
@@ -110,8 +147,8 @@ export function Results({
  * that says which, since leaving now is what nearly every search wants and the
  * controls for the other two would otherwise sit above the results every time.
  *
- * Times are today's: the timetable loaded is today's, and a different day's
- * service is not something this app has to plan with.
+ * Up to a week ahead: today is planned on today's timetable and live buses, a
+ * day to come on the timetable the backend has recorded for that kind of day.
  */
 const TIMING_OPTIONS = [
   { value: 'now', label: 'timingNow' },
@@ -119,42 +156,38 @@ const TIMING_OPTIONS = [
   { value: 'arrive', label: 'timingArrive' },
 ] as const;
 
-/** How far ahead an arrive-by search starts out, before the rider adjusts it. */
-const DEFAULT_ARRIVE_AHEAD_MIN = 30;
-
 function TripTimePicker({
   value,
   onChange,
+  today,
   t,
+  lang,
 }: {
   value: TripTiming;
   onChange: (next: TripTiming) => void;
+  today: string;
   t: T;
+  lang: Language;
 }) {
   const [open, setOpen] = useState(false);
   const pinned = value.kind !== 'now';
+  const day = pinned ? (value.date ?? today) : today;
+
+  const dayName = (date: string) =>
+    date === today
+      ? t('timingToday')
+      : date === addDays(today, 1)
+        ? t('timingTomorrow')
+        : formatDay(date, lang);
 
   const summary =
-    value.kind === 'depart'
-      ? t('timingDepartAt', { time: formatClock(value.at) })
-      : value.kind === 'arrive'
-        ? t('timingArriveBy', { time: formatClock(value.at) })
-        : t('timingNow');
+    value.kind === 'now'
+      ? t('timingNow')
+      : `${t(value.kind === 'depart' ? 'timingDepartAt' : 'timingArriveBy', {
+          time: formatClock(value.at),
+        })}${day === today ? '' : ` · ${dayName(day)}`}`;
 
-  const choose = (kind: TripTiming['kind']) => {
-    if (kind === value.kind) return;
-    if (kind === 'now') {
-      onChange({ kind: 'now' });
-      return;
-    }
-    // Switching between the two pinned modes keeps the time already chosen;
-    // coming from "now" starts from the next round five minutes.
-    const now = minutesOfDay();
-    const at = pinned
-      ? value.at
-      : roundUpToFive(kind === 'arrive' ? now + DEFAULT_ARRIVE_AHEAD_MIN : now);
-    onChange({ kind, at });
-  };
+  const days = Array.from({ length: PLAN_AHEAD_DAYS }, (_, i) => addDays(today, i));
 
   return (
     <div className="rounded-2xl border border-white/10 bg-ink-800/70 p-1">
@@ -188,7 +221,7 @@ function TripTimePicker({
                   type="button"
                   role="radio"
                   aria-checked={selected}
-                  onClick={() => choose(option.value)}
+                  onClick={() => onChange(chooseMode(value, option.value, minutesOfDay(), today))}
                   className={`min-h-9 flex-1 rounded-full px-3 text-xs font-medium transition-colors ${
                     selected ? 'bg-brand-500/20 text-brand-400' : 'text-ink-500 active:bg-white/5'
                   }`}
@@ -200,19 +233,33 @@ function TripTimePicker({
           </div>
 
           {pinned && (
-            <input
-              type="time"
-              step={60}
-              dir="ltr"
-              aria-label={t('timingTimeLabel')}
-              value={formatClock(value.at)}
-              onChange={(e) => {
-                // A half-typed or cleared field is not a time; keep the last one.
-                const at = parseClock(e.target.value);
-                if (at != null) onChange({ kind: value.kind, at });
-              }}
-              className="min-h-11 w-full rounded-xl border border-white/10 bg-ink-900 px-3 text-base tabular-nums text-ink-100"
-            />
+            <div className="flex gap-2">
+              <select
+                aria-label={t('timingDayLabel')}
+                value={day}
+                onChange={(e) => onChange(chooseDay(value, e.target.value, today))}
+                className="min-h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-ink-900 px-3 text-base text-ink-100"
+              >
+                {days.map((date) => (
+                  <option key={date} value={date}>
+                    {dayName(date)}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="time"
+                step={60}
+                dir="ltr"
+                aria-label={t('timingTimeLabel')}
+                value={formatClock(value.at)}
+                onChange={(e) => {
+                  // A half-typed or cleared field is not a time; keep the last one.
+                  const at = parseClock(e.target.value);
+                  if (at != null) onChange(chooseTime(value, at, minutesOfDay(), today));
+                }}
+                className="min-h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-ink-900 px-3 text-base tabular-nums text-ink-100"
+              />
+            </div>
           )}
         </div>
       )}
@@ -220,9 +267,14 @@ function TripTimePicker({
   );
 }
 
-/** Up to the next multiple of five minutes, kept within today. */
-function roundUpToFive(minutes: number): number {
-  return Math.min(Math.ceil(minutes / 5) * 5, MINUTES_PER_DAY - 1);
+/** A date as a short weekday and day, in the rider's language where the browser has it. */
+function formatDay(date: string, lang: Language): string {
+  return new Date(`${date}T12:00:00Z`).toLocaleDateString(lang === 'dv' ? 'dv-MV' : 'en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  });
 }
 
 function ClockIcon() {

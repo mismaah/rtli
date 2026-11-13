@@ -18,7 +18,7 @@ import { TripDetail, StartJourneyBar } from '@/screens/TripDetail';
 import { StopDetail } from '@/screens/StopDetail';
 import { JourneyNav, JourneyActionBar } from '@/screens/JourneyNav';
 import { Saved } from '@/screens/Saved';
-import { useTransitGraph } from '@/hooks/useTransitGraph';
+import { useDayGraph, useTransitGraph } from '@/hooks/useTransitGraph';
 import { useLiveStream } from '@/hooks/useLiveStream';
 import { useGeolocation } from '@/hooks/useGeolocation';
 import { usePlan } from '@/hooks/usePlan';
@@ -42,12 +42,12 @@ import {
   resolvePlaceRef,
   type PlaceRef,
 } from '@/lib/transit/places';
-import { readUrlState, writeUrlState, type UrlState } from '@/lib/urlState';
+import { readUrlState, writeUrlState } from '@/lib/urlState';
 import type { JourneyStep } from '@/lib/transit/journey';
 import { useT } from '@/i18n';
 import { RtlApiError } from '@/api/rtl';
 import type { Itinerary, Place, Stop, TripTiming, WalkLeg } from '@/lib/transit/types';
-import { formatClock, parseClock } from '@/lib/time';
+import { otherDayOf, timingFromUrl, timingToUrl, today } from '@/lib/tripTiming';
 
 type View = 'home' | 'results' | 'detail' | 'stop' | 'saved';
 type Searching = 'origin' | 'destination' | 'save' | null;
@@ -152,8 +152,30 @@ export default function App() {
    * missed, and exactly when its times most need to keep moving.
    */
   const chosenRoutes = useMemo(() => routeCodesOf(selected ? [selected] : []), [selected]);
-  const { itineraries, liveEtas, liveApplied } = usePlan(graph, origin, destination, {
+
+  const now = useNowMinutes();
+  // Re-read as the minute turns, so the day rolls over at midnight with the app open.
+  const todayDate = useMemo(() => today(), [now]);
+
+  /**
+   * A trip on a day still to come is planned on that day's timetable, which
+   * only the backend has. Today's graph stays the one the map, the stops and
+   * live tracking use; this is only what the plan is worked out on.
+   */
+  const planDay = otherDayOf(timing, todayDate);
+  const dayGraph = useDayGraph(planDay);
+  const planGraph = planDay ? dayGraph.data?.graph : graph;
+
+  // Once its day arrives, a trip planned for it is simply today's.
+  useEffect(() => {
+    if (timing.kind !== 'now' && timing.date && timing.date <= todayDate) {
+      setTiming({ kind: timing.kind, at: timing.at });
+    }
+  }, [timing, todayDate]);
+
+  const { itineraries, liveEtas, liveApplied } = usePlan(planGraph, origin, destination, {
     timing,
+    otherDay: planDay != null,
     watchRoutes: chosenRoutes,
   });
 
@@ -200,7 +222,6 @@ export default function App() {
     setSnap('half');
   }, [itineraries, liveApplied]);
 
-  const now = useNowMinutes();
   /**
    * How far into the chosen trip the rider has actually got, which is what stops
    * a re-timing from re-planning them onto a bus behind the one they are sitting
@@ -267,12 +288,15 @@ export default function App() {
   // seconds against a small public service.
   const streamedRoutes = useMemo(
     () =>
-      view === 'detail'
-        ? busLegs.map((leg) => leg.route.code)
-        : view === 'results'
-          ? routeCodesOf(itineraries)
-          : [],
-    [view, busLegs, itineraries],
+      // Live buses say nothing about a trip planned for another day.
+      planDay
+        ? []
+        : view === 'detail'
+          ? busLegs.map((leg) => leg.route.code)
+          : view === 'results'
+            ? routeCodesOf(itineraries)
+            : [],
+    [view, busLegs, itineraries, planDay],
   );
   useLiveStream(streamedRoutes);
 
@@ -323,19 +347,20 @@ export default function App() {
    * the stop would be worse than showing them a time that has run out.
    */
   const walkedDetail = useMemo(() => {
-    if (!graph || !walked) return walked;
+    if (!planGraph || !walked) return walked;
     return (
-      refreshItinerary(graph, walked, {
+      refreshItinerary(planGraph, walked, {
         // A trip picked for a chosen time is held to it, as the list it was picked
         // from is: re-timed from the clock it would slide onto whatever leaves
         // next. Setting off is what puts it on the clock, since a rider who is
-        // actually travelling needs the bus that is actually coming.
+        // actually travelling needs the bus that is actually coming — today, that
+        // is; a trip on another day stays on its timetable regardless.
         //
         // Held from where its search began, which gives back the same buses; no
         // later than when it now says to leave, so a routed walk longer than the
         // estimate moves that earlier rather than the trip onto a later bus.
         now:
-          timing.kind === 'now' || travelling
+          timing.kind === 'now' || (travelling && !planDay)
             ? now
             : Math.min(selected?.plannedFrom ?? walked.departAt, walked.departAt),
         liveEtas,
@@ -343,7 +368,7 @@ export default function App() {
         aboard: reached.aboard,
       }) ?? walked
     );
-  }, [graph, walked, selected, now, liveEtas, reached, timing.kind, travelling]);
+  }, [planGraph, walked, selected, now, liveEtas, reached, timing.kind, travelling, planDay]);
 
   /**
    * The journey as it is being travelled, rather than read about.
@@ -429,7 +454,7 @@ export default function App() {
     writeUrlState({
       from: origin ? encodePlace(origin) : encodeRef(pendingFrom.current),
       to: destination ? encodePlace(destination) : encodeRef(pendingTo.current),
-      ...timingToUrl(timing),
+      ...timingToUrl(timing, todayDate),
       route:
         view === 'detail' && selected
           ? itinerarySignature(selected)
@@ -439,7 +464,17 @@ export default function App() {
         ? (journey.startedAt?.toString() ?? undefined)
         : (pendingSince.current ?? undefined),
     });
-  }, [origin, destination, timing, selected, view, journey.active, journey.step, journey.startedAt]);
+  }, [
+    origin,
+    destination,
+    timing,
+    todayDate,
+    selected,
+    view,
+    journey.active,
+    journey.step,
+    journey.startedAt,
+  ]);
 
   const handlePick = useCallback(
     (place: Place) => {
@@ -489,7 +524,8 @@ export default function App() {
   const sheetFooter =
     graph && view === 'detail' && journey.active && walkedDetail ? (
       <JourneyActionBar journey={journey} onExit={endJourney} />
-    ) : graph && view === 'detail' && selected ? (
+    ) : graph && view === 'detail' && selected && !planDay ? (
+      // A trip on another day is for reading tonight; it is travelled on the day.
       <StartJourneyBar onStart={startJourney} />
     ) : null;
 
@@ -602,7 +638,10 @@ export default function App() {
             itineraries={itineraries}
             timing={timing}
             onTimingChange={setTiming}
-            loading={false}
+            today={todayDate}
+            loading={planDay != null && dayGraph.isPending}
+            dayUnavailable={planDay != null && dayGraph.isError}
+            standInFrom={planDay ? (dayGraph.data?.standInFrom ?? null) : null}
             destinationSaved={Boolean(savedDestination)}
             onToggleSaveDestination={toggleSavedDestination}
             onSelect={(it) => {
@@ -711,21 +750,6 @@ function LocateIcon() {
 function minutesFromUrl(raw: string | null): number | null {
   const minutes = Number(raw);
   return raw && Number.isFinite(minutes) && minutes >= 0 && minutes < 1440 ? minutes : null;
-}
-
-/** The trip time a link asked for; an arrival wins over a departure. */
-function timingFromUrl(state: UrlState): TripTiming {
-  const arrive = parseClock(state.arrive);
-  if (arrive != null) return { kind: 'arrive', at: arrive };
-  const depart = parseClock(state.depart);
-  if (depart != null) return { kind: 'depart', at: depart };
-  return { kind: 'now' };
-}
-
-function timingToUrl(timing: TripTiming): Pick<UrlState, 'depart' | 'arrive'> {
-  if (timing.kind === 'depart') return { depart: formatClock(timing.at) };
-  if (timing.kind === 'arrive') return { arrive: formatClock(timing.at) };
-  return {};
 }
 
 /** A place request that has not resolved yet, written back as the URL had it. */

@@ -224,6 +224,22 @@ func (b *Book) For(ctx context.Context, serviceDate string) (Timings, Source, bo
 	return nil, Source{}, false
 }
 
+// Day returns details with serviceDate's whole timetable in place of what RTL
+// is listing now, for planning a day other than today: the routes and stops are
+// today's, the departures are that day's — its own capture, or the stand-in For
+// chooses. ok is false when there is no timetable to give.
+//
+// Every stop's timings are replaced, including with nothing, rather than merged
+// as Merge does: what RTL lists now is today's, and a stop the day's timetable
+// has no departures at is a stop that day has none at.
+func (b *Book) Day(ctx context.Context, serviceDate string, details rtl.RouteDetails) (rtl.RouteDetails, Source, bool) {
+	timings, source, ok := b.For(ctx, serviceDate)
+	if !ok {
+		return details, Source{}, false
+	}
+	return replaceTimings(details, timings), source, true
+}
+
 // standInLocked picks the complete day nearest in time to serviceDate,
 // preferring one of the same day type.
 func (b *Book) standInLocked(ctx context.Context, serviceDate string) *day {
@@ -409,6 +425,27 @@ func apply(details rtl.RouteDetails, times tripTimes) rtl.RouteDetails {
 			stops[j] = stop
 			if trips := perStop[stop.Code]; len(trips) > 0 {
 				stops[j].Timings = sortedTimings(trips)
+			}
+		}
+		out.RouteResponse[i].BusRouteStopList = stops
+	}
+	return out
+}
+
+// replaceTimings returns details carrying exactly timings, every stop's own
+// set or an empty one. Copies what it changes, as apply does.
+func replaceTimings(details rtl.RouteDetails, timings Timings) rtl.RouteDetails {
+	out := details
+	out.RouteResponse = make([]rtl.Route, len(details.RouteResponse))
+	for i, route := range details.RouteResponse {
+		out.RouteResponse[i] = route
+		perStop := timings[route.Code]
+		stops := make([]rtl.Stop, len(route.BusRouteStopList))
+		for j, stop := range route.BusRouteStopList {
+			stops[j] = stop
+			stops[j].Timings = perStop[stop.Code]
+			if stops[j].Timings == nil {
+				stops[j].Timings = []rtl.Timing{}
 			}
 		}
 		out.RouteResponse[i].BusRouteStopList = stops

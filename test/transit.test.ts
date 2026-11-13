@@ -39,6 +39,15 @@ import {
 } from '@/lib/time';
 import { haversineMeters, bearingDegrees, compassPoint, type LatLng } from '@/lib/geo';
 import {
+  addDays,
+  chooseDay,
+  chooseMode,
+  chooseTime,
+  otherDayOf,
+  timingFromUrl,
+  timingToUrl,
+} from '@/lib/tripTiming';
+import {
   updateTracks,
   type BusTrack,
   isPlausibleFix,
@@ -1705,6 +1714,84 @@ describe('url state', () => {
 
     writeUrlState({});
     expect(window.location.search).toBe('');
+  });
+});
+
+describe('planning another day', () => {
+  const today = '2026-11-13';
+  const evening = parseClock('23:24')!;
+
+  it('takes a time already gone today to mean tomorrow', () => {
+    // The reported case: "arrive by 8 am", picked at night, meant tomorrow.
+    const arriving = chooseMode({ kind: 'now' }, 'arrive', evening, today);
+    expect(chooseTime(arriving as never, parseClock('08:00')!, evening, today)).toEqual({
+      kind: 'arrive',
+      at: parseClock('08:00'),
+      date: '2026-11-14',
+    });
+    // Later today stays today.
+    expect(chooseTime({ kind: 'depart', at: 600 }, 1430, 1400, today)).toEqual({
+      kind: 'depart',
+      at: 1430,
+    });
+    // A day already chosen is not second-guessed.
+    expect(
+      chooseTime({ kind: 'depart', at: 600, date: '2026-11-15' }, 300, evening, today),
+    ).toEqual({ kind: 'depart', at: 300, date: '2026-11-15' });
+  });
+
+  it('starts an arrive-by late in the evening on tomorrow, not at 23:59', () => {
+    // 23:40 plus half an hour is ten past midnight.
+    expect(chooseMode({ kind: 'now' }, 'arrive', parseClock('23:40')!, today)).toEqual({
+      kind: 'arrive',
+      at: 10,
+      date: '2026-11-14',
+    });
+    expect(chooseMode({ kind: 'now' }, 'depart', 600, today)).toEqual({ kind: 'depart', at: 600 });
+  });
+
+  it('keeps the day and time when switching between depart and arrive', () => {
+    const tomorrow = { kind: 'depart', at: 480, date: '2026-11-14' } as const;
+    expect(chooseMode(tomorrow, 'arrive', evening, today)).toEqual({ ...tomorrow, kind: 'arrive' });
+    expect(chooseMode(tomorrow, 'now', evening, today)).toEqual({ kind: 'now' });
+  });
+
+  it('carries today as no date at all', () => {
+    expect(chooseDay({ kind: 'arrive', at: 480, date: '2026-11-14' }, today, today)).toEqual({
+      kind: 'arrive',
+      at: 480,
+    });
+  });
+
+  it('plans on another day only while that day is still to come', () => {
+    expect(otherDayOf({ kind: 'arrive', at: 480, date: '2026-11-14' }, today)).toBe('2026-11-14');
+    expect(otherDayOf({ kind: 'arrive', at: 480, date: today }, today)).toBeNull();
+    // An app left open past midnight: the day has arrived.
+    expect(otherDayOf({ kind: 'arrive', at: 480, date: '2026-11-14' }, '2026-11-14')).toBeNull();
+    expect(otherDayOf({ kind: 'now' }, today)).toBeNull();
+  });
+
+  it('writes another day into the link, and reads it back', () => {
+    const timing = { kind: 'arrive', at: 480, date: '2026-11-14' } as const;
+    expect(timingToUrl(timing, today)).toEqual({ arrive: '2026-11-14T08:00' });
+    expect(timingFromUrl({ arrive: '2026-11-14T08:00' }, today)).toEqual(timing);
+    expect(timingToUrl({ kind: 'depart', at: 480 }, today)).toEqual({ depart: '08:00' });
+    // Opened on the day itself, the same link is simply today.
+    expect(timingFromUrl({ arrive: '2026-11-14T08:00' }, '2026-11-14')).toEqual({
+      kind: 'arrive',
+      at: 480,
+    });
+  });
+
+  it('leaves a stale or out-of-range link leaving now', () => {
+    expect(timingFromUrl({ arrive: '2026-11-12T08:00' }, today)).toEqual({ kind: 'now' });
+    expect(timingFromUrl({ arrive: '2026-12-25T08:00' }, today)).toEqual({ kind: 'now' });
+    expect(timingFromUrl({ depart: 'soon' }, today)).toEqual({ kind: 'now' });
+  });
+
+  it('counts days across a month end', () => {
+    expect(addDays('2026-11-30', 1)).toBe('2026-12-01');
+    expect(addDays('2026-12-31', 1)).toBe('2027-01-01');
   });
 });
 

@@ -170,6 +170,38 @@ func TestStandInPrefersSameDayType(t *testing.T) {
 	}
 }
 
+// Planning tomorrow tonight: the routes are today's, the departures are those of
+// the nearest day of the same type — and none of today's leftovers survive.
+func TestDayCarriesAnotherDaysTimetable(t *testing.T) {
+	db := openStore(t)
+	ctx := t.Context()
+	book := New(db, nil)
+
+	// Saturday 7th complete; it is now Friday 13th evening, with only late
+	// departures left in RTL's listing.
+	book.Merge(ctx, details(map[int]string{1: "07:00:00", 2: "08:00:00"}), male("2026-11-07", 4, 1))
+	today := details(map[int]string{40: "21:00:00"})
+	today.RouteResponse[0].BusRouteStopList[1].Timings = []rtl.Timing{{Order: 40, Timing: "21:05:00"}}
+
+	day, source, ok := book.Day(ctx, "2026-11-14", today)
+	if !ok {
+		t.Fatal("no timetable for Saturday with a Saturday captured")
+	}
+	if source.Date != "2026-11-07" || source.Own {
+		t.Errorf("source = %+v, want Saturday 2026-11-07 standing in", source)
+	}
+	stops := day.RouteResponse[0].BusRouteStopList
+	if got := orders(stops[0].Timings); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("stop A trips = %v, want Saturday's 1 and 2", got)
+	}
+	if stops[1].Timings == nil || len(stops[1].Timings) != 0 {
+		t.Errorf("stop B timings = %+v, want empty: tonight's 21:05 is not Saturday's", stops[1].Timings)
+	}
+	if len(today.RouteResponse[0].BusRouteStopList[0].Timings) != 1 {
+		t.Error("Day changed the caller's response")
+	}
+}
+
 func TestNothingKnownForADay(t *testing.T) {
 	book := New(openStore(t), nil)
 	if _, _, ok := book.For(t.Context(), "2026-09-14"); ok {
