@@ -45,7 +45,7 @@ import {
 import { readUrlState, writeUrlState } from '@/lib/urlState';
 import type { JourneyStep } from '@/lib/transit/journey';
 import { useT } from '@/i18n';
-import { RtlApiError } from '@/api/rtl';
+import { DayTimetableError, RtlApiError } from '@/api/rtl';
 import type { Itinerary, Place, Stop, TripTiming, WalkLeg } from '@/lib/transit/types';
 import { otherDayOf, timingFromUrl, timingToUrl, today } from '@/lib/tripTiming';
 
@@ -640,8 +640,15 @@ export default function App() {
             onTimingChange={setTiming}
             today={todayDate}
             loading={planDay != null && dayGraph.isPending}
-            dayUnavailable={planDay != null && dayGraph.isError}
+            dayUnavailable={
+              planDay != null && dayGraph.isError
+                ? dayGraph.error instanceof DayTimetableError
+                  ? dayGraph.error.reason
+                  : 'unavailable'
+                : null
+            }
             standInFrom={planDay ? (dayGraph.data?.standInFrom ?? null) : null}
+            dayBasis={planDay ? (dayGraph.data?.basis ?? null) : null}
             destinationSaved={Boolean(savedDestination)}
             onToggleSaveDestination={toggleSavedDestination}
             onSelect={(it) => {

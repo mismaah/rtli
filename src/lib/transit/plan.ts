@@ -1,6 +1,7 @@
 import { walkMeters, walkSeconds } from '@/lib/geo';
 import {
   earlyBufferAt,
+  expectedLateMinAt,
   runsAt,
   typicalLateMinAt,
   waitMinutesAt,
@@ -194,6 +195,8 @@ export interface ArriveByOptions extends Omit<PlanOptions, 'departAt'> {
 
 /** How far before the deadline an arrive-by search looks for a way to leave. */
 export const ARRIVE_BY_WINDOW_MIN = 120;
+/** How far an arrive-by sweep moves on from a start that found nothing in time. */
+const ARRIVE_BY_IDLE_STEP_MIN = 10;
 
 /**
  * The latest each journey can leave and still be at the destination by
@@ -209,9 +212,9 @@ export const ARRIVE_BY_WINDOW_MIN = 120;
  * Every pass finds the next departure of each option from the time it starts,
  * and starting any later changes nothing until the soonest of those departures
  * has gone — each is still catchable, and still the earliest arrival where it
- * lands. So each pass starts a minute after the last one's soonest departure,
- * and the sweep ends at the first pass with nothing in time: what remains is
- * the last departure of each option that still makes the deadline.
+ * lands. So each pass starts a minute after the last one's soonest departure, or
+ * a few minutes on from one that found nothing in time, up to the deadline: what
+ * remains is the last departure of each option that still makes it.
  *
  * Ranked on when the rider has to leave rather than when they arrive — see
  * `generalizedCost`.
@@ -251,10 +254,13 @@ export function planArrivingBy(
         latest.set(key, { ...it, id: key });
       }
     }
-    // Leaving later never arrives sooner, so once nothing makes the deadline
-    // nothing after it will either.
-    if (soonest === Infinity) break;
-    departAt = Math.max(departAt + 1, Math.floor(soonest) + 1);
+    // Nothing in time from here is no reason to stop: a route the recorder has
+    // never seen running at 06:00 cannot be waited for until it starts at 07:00,
+    // so a later start can still find what this one could not.
+    departAt =
+      soonest === Infinity
+        ? departAt + ARRIVE_BY_IDLE_STEP_MIN
+        : Math.max(departAt + 1, Math.floor(soonest) + 1);
   }
 
   const candidates = [...latest.values()];
@@ -1057,6 +1063,9 @@ function earliestTrip(
     // arrive on the printed minute misses one in four.
     const early = buffered ? earlyBufferAt(route.measured, depart) : 0;
     if (depart - early < readyAt) continue;
+    // Printed, but not once seen running at this hour in weeks of watching:
+    // what the buses do outranks what the timetable says they will.
+    if (!runsAt(route.measured, depart)) continue;
     if (depart < bestDeparture) {
       bestDeparture = depart;
       bestTrip = {
@@ -1140,7 +1149,10 @@ function arrivalAt(
     const atTerminal =
       boardIndex < terminal
         ? arrivalAt(graph, route, trip, boardIndex, terminal, boardLabel)
-        : { at: departureAt(trip, boardIndex, boardLabel), estimated: trip.estimated };
+        : {
+            at: departureAt(trip, boardIndex, boardLabel) + runningLate(route, trip, boardIndex),
+            estimated: trip.estimated,
+          };
     if (atTerminal == null) return null;
     return {
       at:
@@ -1182,12 +1194,29 @@ function arrivalAt(
   const scheduled = from != null && to != null ? to - from : arrive - depart;
 
   return {
-    at: departureAt(trip, boardIndex, boardLabel) + (measured ?? scheduled),
+    // Leaving when this route typically does at this hour, not when it was
+    // printed to: the rider is at the stop on time, the bus is not.
+    at:
+      departureAt(trip, boardIndex, boardLabel) +
+      runningLate(route, trip, boardIndex) +
+      (measured ?? scheduled),
     // A measured ride is an observation of this stretch, so a leg the timetable
     // had to have repaired is no longer being guessed at and stops being flagged.
     estimated:
       measured == null && trip.repairsBefore[alightIndex] > trip.repairsBefore[boardIndex],
   };
+}
+
+/**
+ * How far behind its published departure a timetabled bus is expected to leave
+ * `boardIndex`, from what the recorder has measured. Zero for a bus the feed is
+ * tracking — its reported time already is when it is coming — and for a route
+ * with no timetable, whose modelled wait is measured already.
+ */
+function runningLate(route: Route, trip: TripView, boardIndex: number): number {
+  if (trip.live || trip.estimated || trip.times.length === 0) return 0;
+  const depart = trip.times[boardIndex];
+  return depart == null ? 0 : expectedLateMinAt(route.measured, depart);
 }
 
 /** Walks the label chain back to the origin and emits legs in travel order. */

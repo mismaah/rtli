@@ -10,7 +10,7 @@
  * these functions have the same contract whether or not a server is configured
  * or reachable. Every call site above this file is unchanged by its presence.
  */
-import { fetchFromBackend, GRAPH_TIMEOUT_MS } from './backend';
+import { askBackend, fetchFromBackend, GRAPH_TIMEOUT_MS } from './backend';
 import type { CatalogKey } from '@/i18n/types';
 
 const BOOKING_BASE = 'https://bo.rtl.mv:4455/maldives/api';
@@ -183,23 +183,34 @@ export interface DayRouteDetails extends RouteDetailsResponse {
 }
 
 /**
+ * Why another day's timetable could not be had: the backend has recorded no
+ * day it could stand in with (`missing`), or it could not be asked at all.
+ */
+export class DayTimetableError extends Error {
+  constructor(readonly reason: 'missing' | 'unavailable') {
+    super(`another day's timetable is ${reason}`);
+  }
+}
+
+/**
  * The routes with another day's departures, for planning ahead.
  *
  * Backend only: RTL publishes nothing but what is left of today, so a day still
  * to come exists only in the timetable the backend has been recording. Throws
- * when that cannot be had, which the caller shows rather than falls back from.
+ * a `DayTimetableError` when that cannot be had, which the caller shows rather
+ * than falls back from.
  */
 export async function fetchRouteDetailsForDay(
   date: string,
   signal?: AbortSignal,
 ): Promise<DayRouteDetails> {
-  const served = await fetchFromBackend<DayRouteDetails>(
+  const answer = await askBackend<DayRouteDetails>(
     `/v1/graph?date=${encodeURIComponent(date)}`,
     signal,
     { timeoutMs: GRAPH_TIMEOUT_MS },
   );
-  if (!served) throw new Error(`no timetable for ${date}`);
-  return served;
+  if (answer.kind !== 'ok') throw new DayTimetableError(answer.kind);
+  return answer.data;
 }
 
 /** Route geometry. The backend's copy arrives already simplified. */

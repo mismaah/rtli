@@ -86,6 +86,13 @@ export const en = {
   otherDayNote: 'Planned from the timetable. Live bus times show on the day.',
   otherDayStandIn: 'Times are from {date}, the latest recorded day of the same kind.',
   otherDayUnavailable: "Couldn't load the timetable for that day. Planning ahead needs the RTL Improved server.",
+  otherDayPattern:
+    'No timetable has been recorded for that day yet, so these times are estimated from how buses ran on recent {days}. Expect a bus about this often, not at this exact minute.',
+  dayTypeWeekdays: 'weekdays',
+  dayTypeFridays: 'Fridays',
+  dayTypeSaturdays: 'Saturdays',
+  otherDayNotRecorded:
+    "Days ahead can't be planned yet: no full day's timetable has been recorded. The server records each day from 4 am, so try again after then.",
 
   // ---- Itineraries -----------------------------------------------------
   direct: 'Direct',

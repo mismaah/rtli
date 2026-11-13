@@ -276,6 +276,30 @@ export function earlyBufferAt(measured: RouteMeasurements | undefined, maleMinut
   return Math.min(MAX_EARLY_BUFFER_MIN, Math.round(early));
 }
 
+/** The most delay an arrival estimate is ever stretched by. */
+export const MAX_EXPECTED_LATE_MIN = 20;
+
+/**
+ * Minutes a timetabled bus is expected to be behind its published time at this
+ * hour — the measured median, or zero where it runs early, on time, or too
+ * little is known.
+ *
+ * For when the rider *arrives*, never for when they should be at the stop: that
+ * stays the published time (or earlier, see `earlyBufferAt`), since telling them
+ * to turn up at the median delay would have them miss half the buses. But once
+ * they are on, a bus that typically leaves six minutes behind gets there six
+ * minutes behind, and the arrival — and every connection judged against it —
+ * should say so. What the buses have been seen to do outranks what was printed.
+ */
+export function expectedLateMinAt(
+  measured: RouteMeasurements | undefined,
+  maleMinutes: number,
+): number {
+  if (!measured || measured.latenessSamples < MIN_LATENESS_SAMPLES) return 0;
+  const late = measured.latenessByHour?.[hourKey(maleMinutes)];
+  return typeof late === 'number' && late > 0 ? Math.min(late, MAX_EXPECTED_LATE_MIN) : 0;
+}
+
 /**
  * Whole minutes this route typically runs late at a given time, when that is
  * enough to mention; otherwise undefined.

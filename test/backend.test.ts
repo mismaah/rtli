@@ -163,6 +163,27 @@ describe('fetchRouteDetails', () => {
     expect(served.details).toEqual(rtlGraph);
   });
 
+  it('tells a day nothing has been recorded for apart from an unreachable backend', async () => {
+    const { fetchRouteDetailsForDay, DayTimetableError } = await withBackend();
+    const backend = await import('@/api/backend');
+    globalThis.fetch = vi.fn(async () =>
+      new Response('{"error":"no timetable for that day"}', { status: 404 }),
+    ) as typeof fetch;
+
+    // Asked repeatedly, as a rider retrying would: still "missing" every time,
+    // and the backend never set aside for it — live times keep coming from it.
+    for (let i = 0; i < 3; i++) {
+      const err = await fetchRouteDetailsForDay('2026-11-14').catch((e) => e);
+      expect(err).toBeInstanceOf(DayTimetableError);
+      expect(err.reason).toBe('missing');
+    }
+    expect(backend.backendWorthAsking()).toBe(true);
+
+    globalThis.fetch = vi.fn(async () => new Response('down', { status: 502 })) as typeof fetch;
+    const err = await fetchRouteDetailsForDay('2026-11-14').catch((e) => e);
+    expect(err.reason).toBe('unavailable');
+  });
+
   // Six seconds is the right budget for a bus position. It is the wrong one for
   // 300 KB of timetable whose only alternative is fetching the same thing,
   // uncompressed, from further away.

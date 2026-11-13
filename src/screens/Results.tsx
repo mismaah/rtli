@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ItineraryCard } from '@/components/ItineraryCard';
 import { formatClock, minutesOfDay, parseClock } from '@/lib/time';
+import { dayTypeOf } from '@/lib/transit/applyHistory';
 import {
   addDays,
   chooseDay,
@@ -24,10 +25,15 @@ interface Props {
   /** Today's Malé date, `YYYY-MM-DD`. */
   today: string;
   loading: boolean;
-  /** The timetable for the chosen day could not be had. */
-  dayUnavailable?: boolean;
+  /**
+   * Why the timetable for the chosen day could not be had, or null: nothing
+   * recorded to plan it on yet, or the backend could not be reached.
+   */
+  dayUnavailable?: 'missing' | 'unavailable' | null;
   /** The recorded day another day's plan is standing in for it with. */
   standInFrom?: string | null;
+  /** What another day is planned on; see `DayGraphResult.basis`. */
+  dayBasis?: 'timetable' | 'pattern' | null;
   onSelect: (itinerary: Itinerary) => void;
   onEditOrigin: () => void;
   onEditDestination: () => void;
@@ -44,8 +50,9 @@ export function Results({
   onTimingChange,
   today,
   loading,
-  dayUnavailable = false,
+  dayUnavailable = null,
   standInFrom = null,
+  dayBasis = null,
   onSelect,
   onEditOrigin,
   onEditDestination,
@@ -55,7 +62,9 @@ export function Results({
   const walkPreference = usePrefs((s) => s.walkPreference);
   const setWalkPreference = usePrefs((s) => s.setWalkPreference);
   const { t, lang } = useT();
-  const otherDay = timing.kind !== 'now' && timing.date != null && timing.date !== today;
+  /** The day being planned when it is not today, or null. */
+  const otherDay =
+    timing.kind !== 'now' && timing.date != null && timing.date !== today ? timing.date : null;
 
   return (
     <div className="space-y-4">
@@ -97,7 +106,12 @@ export function Results({
         lang={lang}
       />
 
-      {otherDay && !dayUnavailable && (
+      {otherDay && !dayUnavailable && dayBasis === 'pattern' && (
+        <p className="px-1 text-xs text-amber-200/80">
+          {t('otherDayPattern', { days: t(DAY_TYPE_PLURAL[dayTypeOf(otherDay)]) })}
+        </p>
+      )}
+      {otherDay && !dayUnavailable && dayBasis === 'timetable' && (
         <p className="px-1 text-xs text-ink-500">
           {t('otherDayNote')}
           {standInFrom &&
@@ -113,7 +127,9 @@ export function Results({
 
       {dayUnavailable && (
         <div className="rounded-2xl border border-white/10 bg-ink-800/50 p-6 text-center">
-          <p className="text-sm text-ink-300">{t('otherDayUnavailable')}</p>
+          <p className="text-sm text-ink-300">
+            {t(dayUnavailable === 'missing' ? 'otherDayNotRecorded' : 'otherDayUnavailable')}
+          </p>
         </div>
       )}
 
@@ -150,6 +166,9 @@ export function Results({
  * Up to a week ahead: today is planned on today's timetable and live buses, a
  * day to come on the timetable the backend has recorded for that kind of day.
  */
+/** How a day type is named when talking about "recent ones". */
+const DAY_TYPE_PLURAL = { week: 'dayTypeWeekdays', fri: 'dayTypeFridays', sat: 'dayTypeSaturdays' } as const;
+
 const TIMING_OPTIONS = [
   { value: 'now', label: 'timingNow' },
   { value: 'depart', label: 'timingDepart' },

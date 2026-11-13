@@ -243,7 +243,8 @@ export interface BusLeg {
   boardBy?: number;
   /**
    * How many minutes late this route typically runs at this hour, when that is
-   * enough to be worth saying. Surfaced only; `arriveAt` is not moved by it.
+   * enough to be worth saying. `arriveAt` already allows for it; when to be
+   * at the stop does not, since turning up late would miss the bus that is not.
    */
   typicalLateMin?: number;
 }

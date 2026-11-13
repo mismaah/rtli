@@ -38,6 +38,7 @@ import {
   msUntilNextMinute,
 } from '@/lib/time';
 import { haversineMeters, bearingDegrees, compassPoint, type LatLng } from '@/lib/geo';
+import { patternGraph } from '@/lib/transit/patternGraph';
 import {
   addDays,
   chooseDay,
@@ -119,6 +120,8 @@ import {
   runsAt,
   typicalLateMinAt,
   waitMinutesAt,
+  expectedLateMinAt,
+  MAX_EXPECTED_LATE_MIN,
 } from '@/lib/transit/applyHistory';
 import type { BusLeg, Itinerary, Place, TransitGraph, WalkLeg } from '@/lib/transit/types';
 import type { WalkPath } from '@/api/walking';
@@ -1795,6 +1798,60 @@ describe('planning another day', () => {
   });
 });
 
+describe('planning a day no timetable has been recorded for', () => {
+  const raw = fixture as unknown as RouteDetailsResponse;
+  const saturdays = (routes: HistorySummary['routes']): HistorySummary => ({
+    generatedAtMs: 0,
+    fromMs: 0,
+    days: 27,
+    dayTypeDays: { week: 20, fri: 3, sat: 4 },
+    routes,
+  });
+  const r1 = { headwaySamples: 500, latenessSamples: 0, activeDays: 27 };
+  const r1Saturdays = saturdays({
+    '133': {
+      ...r1,
+      dayTypes: { sat: { activeDays: 4, activeByHour: { '7': 1 }, waitByHour: { '7': 9 } } },
+    },
+  });
+
+  it("plans it on how that kind of day's buses have been seen to run", () => {
+    const g = patternGraph(raw, '2026-11-14', r1Saturdays)!;
+    expect(g.serviceDate).toBe('2026-11-14');
+    // No published times survive: every route is planned on its measurements.
+    for (const route of g.routes.values()) expect(route.trips).toEqual([]);
+
+    const arrive = parseClock('08:00')!;
+    const options = planArrivingBy(g, stopPlace('103'), stopPlace('114'), { arriveBy: arrive });
+    const r1Trip = options.find((it) =>
+      it.legs.some((l) => l.kind === 'bus' && l.route.code === '133'),
+    )!;
+    expect(r1Trip.estimated).toBe(true);
+    expect(r1Trip.arriveAt).toBeLessThanOrEqual(arrive);
+    // Boarded in the hour Saturdays have it running, though the search window
+    // opens an hour before it starts.
+    const bus = r1Trip.legs.find((l): l is BusLeg => l.kind === 'bus')!;
+    expect(Math.floor(bus.departAt / 60)).toBe(7);
+  });
+
+  it('offers no route the recorder has never seen running at that hour of such a day', () => {
+    const g = patternGraph(
+      raw,
+      '2026-11-14',
+      saturdays({ '133': { ...r1, dayTypes: { sat: { activeDays: 4, activeByHour: { '7': 0 } } } } }),
+    )!;
+    const options = planArrivingBy(g, stopPlace('103'), stopPlace('114'), {
+      arriveBy: parseClock('08:00')!,
+    });
+    expect(options.some((it) => it.legs.some((l) => l.kind === 'bus' && l.route.code === '133'))).toBe(false);
+  });
+
+  it('has nothing to say about a kind of day never watched', () => {
+    expect(patternGraph(raw, '2026-11-14', { ...saturdays({}), dayTypeDays: { week: 20 } })).toBeNull();
+    expect(patternGraph(raw, '2026-11-14', null)).toBeNull();
+  });
+});
+
 describe('recent trips', () => {
   beforeEach(() => useRecentTrips.getState().clear());
 
@@ -2853,12 +2910,66 @@ describe('what the recorder says about when and how buses run', () => {
 
       expect(directR1(late(4.4), NOON)!.bus.typicalLateMin).toBe(4);
       expect(directR1(late(1.5), NOON)!.bus.typicalLateMin).toBeUndefined();
-      // Surfaced, not applied: the timetable stays the claim.
+      // When to be at the stop stays the published time: turning up at the
+      // median delay would miss half the buses.
       expect(directR1(late(4.4), NOON)!.bus.departAt).toBe(due);
+    });
+
+    // What the buses do outranks what was printed: a bus that typically leaves
+    // six minutes behind gets there six minutes behind.
+    it('gets there when the route typically does, not when it was printed to', () => {
+      const plain = directR1(fresh(), NOON)!;
+      const hour = String(Math.floor(plain.bus.departAt / 60));
+      const late = withHistory(fresh(), {
+        [R1]: { headwaySamples: 0, latenessSamples: 1000, latenessByHour: { [hour]: 6 } },
+      });
+      const { it, bus } = directR1(late, NOON)!;
+
+      expect(bus.departAt).toBe(plain.bus.departAt);
+      expect(bus.arriveAt).toBeCloseTo(plain.bus.arriveAt + 6);
+      expect(it.arriveAt).toBeCloseTo(plain.it.arriveAt + 6);
+      // Early-running or on-time hours stretch nothing.
+      const early = withHistory(fresh(), {
+        [R1]: { headwaySamples: 0, latenessSamples: 1000, latenessByHour: { [hour]: -2 } },
+      });
+      expect(directR1(early, NOON)!.bus.arriveAt).toBe(plain.bus.arriveAt);
+    });
+
+    it('stretches arrivals only on enough evidence, and only so far', () => {
+      const m = { headwaySamples: 0, headwayIsLap: false, latenessSamples: 1000 };
+      expect(expectedLateMinAt({ ...m, latenessByHour: { '12': 6 } }, NOON)).toBe(6);
+      expect(expectedLateMinAt({ ...m, latenessByHour: { '12': 90 } }, NOON)).toBe(
+        MAX_EXPECTED_LATE_MIN,
+      );
+      expect(expectedLateMinAt({ ...m, latenessSamples: 10, latenessByHour: { '12': 6 } }, NOON)).toBe(0);
     });
 
     it('only on enough evidence', () => {
       expect(typicalLateMinAt({ headwaySamples: 0, headwayIsLap: false, latenessSamples: 10, latenessByHour: { '12': 9 } }, NOON)).toBeUndefined();
+    });
+  });
+
+  describe('a timetabled route the buses do not keep to', () => {
+    // Weeks of watching outrank the printed timetable: a published R1 at an
+    // hour nobody has seen an R1 running is not a bus to send a rider to.
+    it('does not offer published trips at an hour the route was never seen running', () => {
+      const plain = directR1(fresh(), NOON)!;
+      const hour = Math.floor(plain.bus.departAt / 60);
+      const g = withHistory(
+        fresh(),
+        {
+          [R1]: {
+            headwaySamples: 0,
+            latenessSamples: 0,
+            activeDays: 25,
+            activeByHour: { [String(hour)]: 0, [String(hour + 1)]: 1, [String(hour + 2)]: 1 },
+          },
+        },
+        { days: 27 },
+      );
+      const offered = directR1(g, NOON);
+      expect(offered).not.toBeNull();
+      expect(Math.floor(offered!.bus.departAt / 60)).toBeGreaterThan(hour);
     });
   });
 

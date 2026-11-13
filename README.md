@@ -325,9 +325,19 @@ falls back to distance and speed while every measured pair beside it still count
 No history at all, which is every client with no backend configured, leaves the
 graph exactly as it was built.
 
-Lateness against the published timetable is measured and served too, but is
-deliberately *not* applied to departure times. Shifting a boarding later by the
-median delay tells a rider to arrive after half the buses have already gone.
+Lateness against the published timetable is measured and served too. It is
+deliberately *not* applied to when the rider is told to be at the stop: shifting
+a boarding later by the median delay tells a rider to arrive after half the buses
+have already gone. It *is* applied to when they get there — a bus that typically
+leaves six minutes behind arrives six minutes behind, and connections are judged
+on that — capped at `MAX_EXPECTED_LATE_MIN`.
+
+The same rule, that what the buses have been seen to do outranks what was
+printed, decides what is offered at all: a published trip at an hour the recorder
+has never seen that route running is not offered, exactly as a frequency route
+outside its measured hours is not. And a day with no timetable recorded for it —
+planning ahead before the backend has captured a day of that kind — is planned
+entirely on its day type's measurements (`patternGraph`), flagged as estimated.
 
 #### What the recorder got wrong for its first six days
 

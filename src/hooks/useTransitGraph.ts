@@ -1,12 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
-import { fetchRouteDetails, fetchRouteDetailsForDay, type Via } from '@/api/rtl';
+import {
+  DayTimetableError,
+  fetchRouteDetails,
+  fetchRouteDetailsForDay,
+  type Via,
+} from '@/api/rtl';
 import { backendWorthAsking, COOLDOWN_MS } from '@/api/backend';
 import { fetchHistory } from '@/api/history';
 import { applyHistory } from '@/lib/transit/applyHistory';
 import { buildGraph } from '@/lib/transit/buildGraph';
 import { loadOfflineRouteDetails, mergeWithStoredTimetable } from '@/lib/timetableCache';
 import type { TransitGraph } from '@/lib/transit/types';
-import { MALE_UTC_OFFSET_MIN } from '@/lib/time';
+import { middayOf, patternGraph } from '@/lib/transit/patternGraph';
 
 export const TRANSIT_GRAPH_KEY = ['rtl', 'routedetails'] as const;
 
@@ -136,6 +141,11 @@ export function useTransitGraph() {
 export interface DayGraphResult {
   graph: TransitGraph;
   /**
+   * What the day is planned on: a recorded timetable, or — when none like it has
+   * been recorded yet — how its buses have been seen to run. See `patternGraph`.
+   */
+  basis: 'timetable' | 'pattern';
+  /**
    * The recorded day the times were taken from, when it is not the day itself —
    * which for a day still to come it always is, since nothing has seen it yet.
    */
@@ -154,18 +164,33 @@ export function useDayGraph(date: string | null) {
     queryKey: [...TRANSIT_GRAPH_KEY, 'day', date],
     enabled: date != null,
     queryFn: async ({ signal }) => {
-      const details = await fetchRouteDetailsForDay(date!, signal);
+      let details;
+      try {
+        details = await fetchRouteDetailsForDay(date!, signal);
+      } catch (err) {
+        if (!(err instanceof DayTimetableError && err.reason === 'missing')) throw err;
+        // No timetable like that day's recorded yet: plan it on how its buses
+        // have been seen to run, if they have been watched on such a day.
+        const [{ details: today }, history] = await Promise.all([
+          fetchRouteDetails(signal),
+          fetchHistory(signal),
+        ]);
+        const graph = patternGraph(today, date!, history);
+        if (!graph) throw err;
+        return { graph, basis: 'pattern', standInFrom: null };
+      }
       const history = await fetchHistory(signal);
-      // Midday Malé time on that date, so the graph is stamped with its day.
-      const midday = new Date(Date.parse(`${date}T12:00:00Z`) - MALE_UTC_OFFSET_MIN * 60_000);
       const from = details.timetable?.from;
       return {
-        graph: applyHistory(buildGraph(details, midday), history),
+        graph: applyHistory(buildGraph(details, middayOf(date!)), history),
+        basis: 'timetable',
         standInFrom: from && from !== date ? from : null,
       };
     },
     staleTime: 30 * 60 * 1000,
     gcTime: 24 * 60 * 60 * 1000,
-    retry: 1,
+    // Asking again will not record a day that has not been recorded.
+    retry: (count, err) =>
+      count < 1 && !(err instanceof DayTimetableError && err.reason === 'missing'),
   });
 }

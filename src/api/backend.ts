@@ -92,6 +92,9 @@ export class CircuitBreaker {
 
 const breaker = new CircuitBreaker();
 
+const MISSING = { kind: 'missing' } as const;
+const UNAVAILABLE = { kind: 'unavailable' } as const;
+
 export interface BackendOptions {
   /** Overrides the default wait budget; see GRAPH_TIMEOUT_MS. */
   timeoutMs?: number;
@@ -109,10 +112,29 @@ export interface BackendOptions {
 export async function fetchFromBackend<T>(
   path: string,
   signal?: AbortSignal,
-  { timeoutMs = BACKEND_TIMEOUT_MS, now = Date.now() }: BackendOptions = {},
+  options: BackendOptions = {},
 ): Promise<T | null> {
-  if (!API_BASE) return null;
-  if (breaker.isOpen(now)) return null;
+  const answer = await askBackend<T>(path, signal, options);
+  return answer.kind === 'ok' ? answer.data : null;
+}
+
+/**
+ * What the backend said, for a caller that has to tell "there is no such
+ * thing" from "the backend could not be reached".
+ *
+ * A 404 is the backend working: it looked and has nothing. Counting it as a
+ * failure would hand the whole app — live times, positions, the stream — to RTL
+ * for a minute because a rider asked about a day nothing has been recorded for.
+ */
+export type BackendAnswer<T> = { kind: 'ok'; data: T } | { kind: 'missing' } | { kind: 'unavailable' };
+
+export async function askBackend<T>(
+  path: string,
+  signal?: AbortSignal,
+  { timeoutMs = BACKEND_TIMEOUT_MS, now = Date.now() }: BackendOptions = {},
+): Promise<BackendAnswer<T>> {
+  if (!API_BASE) return UNAVAILABLE;
+  if (breaker.isOpen(now)) return UNAVAILABLE;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -124,19 +146,23 @@ export async function fetchFromBackend<T>(
       signal: controller.signal,
       headers: { Accept: 'application/json' },
     });
+    if (res.status === 404) {
+      breaker.recordSuccess();
+      return MISSING;
+    }
     if (!res.ok) {
       breaker.recordFailure(Date.now());
-      return null;
+      return UNAVAILABLE;
     }
     const data = (await res.json()) as T;
     breaker.recordSuccess();
-    return data;
+    return { kind: 'ok', data };
   } catch {
     // A caller-driven abort is not the backend's fault, so it must not count
     // against it — otherwise ordinary navigation would trip the breaker.
-    if (signal?.aborted) return null;
+    if (signal?.aborted) return UNAVAILABLE;
     breaker.recordFailure(Date.now());
-    return null;
+    return UNAVAILABLE;
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', onAbort);
