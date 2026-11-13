@@ -1,6 +1,7 @@
 package rollup
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/mismaah/rtl-improved/server/internal/geo"
 	"github.com/mismaah/rtl-improved/server/internal/rtl"
 	"github.com/mismaah/rtl-improved/server/internal/store"
+	"github.com/mismaah/rtl-improved/server/internal/timetable"
 )
 
 func mustParse(t *testing.T, s string) time.Time {
@@ -392,5 +394,150 @@ func TestJobDoesNotRetireADayItCouldNotRollUp(t *testing.T) {
 	stats, _ = db.Stats(t.Context())
 	if stats.Arrivals == 0 {
 		t.Error("yesterday was retired by the pass that could not read it, and never rolled up")
+	}
+}
+
+// fakeTimetables serves one fixed day's timings.
+type fakeTimetables struct {
+	date    string
+	timings timetable.Timings
+}
+
+func (f *fakeTimetables) For(_ context.Context, date string) (timetable.Timings, timetable.Source, bool) {
+	if date != f.date {
+		return nil, timetable.Source{}, false
+	}
+	return f.timings, timetable.Source{Date: date, Own: true, Complete: true}, true
+}
+func (f *fakeTimetables) Generation() int { return 1 }
+
+// The production fault: the timetable was RTL's snapshot from whenever the
+// server started, which lists only departures still to come. A 05:00 lap was
+// therefore measured against a timetable that began at 07:15 and never matched.
+// Measured against the day's own timetable, it does.
+func TestJobMeasuresAgainstTheDaysOwnTimetable(t *testing.T) {
+	line, stops := r1(t)
+	shapeRaw, err := os.ReadFile(fixtureDir + "roadshape-r1.json")
+	if err != nil {
+		t.Fatalf("read roadshape: %v", err)
+	}
+
+	// The snapshot as the poller holds it mid-morning: the stops, no 05:00 trip.
+	snapshot := make([]rtl.Stop, len(stops))
+	for i, s := range stops {
+		snapshot[i] = s
+		snapshot[i].Timings = nil
+	}
+	ref := &fixtureRef{stops: snapshot, lines: geo.Polylines(shapeRaw)}
+
+	// A lap at 05:00 Malé on 2 September.
+	start := mustParse(t, "2026-09-02T00:00:00Z")
+	var fixes []store.Fix
+	for d := 0.0; d < line.Length(); d += 100 {
+		lat, lng := alongR1(line, d)
+		fixes = append(fixes, store.Fix{
+			RouteCode: "133", BusCode: "C1",
+			AtMs: start.Add(time.Duration(d/10) * time.Second).UnixMilli(),
+			Lat:  lat, Lng: lng, SnapLat: &lat, SnapLng: &lng,
+		})
+	}
+
+	// The day's own timetable has that lap as trip 1, two minutes behind it.
+	timings := map[string][]rtl.Timing{}
+	for _, stop := range ResolveStops(snapshot, NewLine(geo.Polylines(shapeRaw))) {
+		due := start.Add(time.Duration(stop.AlongM/10)*time.Second - 2*time.Minute).UTC().Add(MaleOffset)
+		timings[stop.Code] = []rtl.Timing{{Order: 1, Timing: due.Format("15:04:05")}}
+	}
+
+	matched := func(withTimetables bool) int64 {
+		db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "own.db"))
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		defer db.Close()
+		if err := db.InsertFixes(t.Context(), fixes); err != nil {
+			t.Fatalf("InsertFixes: %v", err)
+		}
+		job := NewJob(db, ref, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if withTimetables {
+			job.UseTimetables(&fakeTimetables{date: "2026-09-02",
+				timings: timetable.Timings{"133": timings}})
+		}
+		job.Once(t.Context(), start.Add(3*time.Hour))
+		res, err := db.Query(t.Context(),
+			"SELECT COUNT(*) FROM stop_arrival WHERE delta_min BETWEEN 1 AND 3", nil, 1)
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		return res.Rows[0][0].(int64)
+	}
+
+	if n := matched(false); n != 0 {
+		t.Fatalf("snapshot with no morning matched %d arrivals; the fixture is wrong", n)
+	}
+	if n := matched(true); n < 10 {
+		t.Errorf("matched %d arrivals ~2 min late against the day's own timetable, want most of a lap", n)
+	}
+}
+
+// countingTimetables records how often each day was asked for, and reports a
+// day as its own complete timetable only when listed in own.
+type countingTimetables struct {
+	generation int
+	own        map[string]bool
+	asked      map[string]int
+}
+
+func (c *countingTimetables) For(_ context.Context, date string) (timetable.Timings, timetable.Source, bool) {
+	c.asked[date]++
+	return timetable.Timings{}, timetable.Source{Date: date, Own: c.own[date], Complete: true}, true
+}
+func (c *countingTimetables) Generation() int { return c.generation }
+
+// When a better stand-in appears, the days measured against the old one are
+// derived again — and the days that had their own timetable are not.
+func TestBackfillRederivesStandInDaysWhenTimetablesImprove(t *testing.T) {
+	line, stops := r1(t)
+	shapeRaw, err := os.ReadFile(fixtureDir + "roadshape-r1.json")
+	if err != nil {
+		t.Fatalf("read roadshape: %v", err)
+	}
+	ref := &fixtureRef{stops: stops, lines: geo.Polylines(shapeRaw)}
+	db, err := store.Open(t.Context(), filepath.Join(t.TempDir(), "regen.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	now := mustParse(t, "2026-09-06T06:00:00Z")
+	var fixes []store.Fix
+	for day := 1; day <= 4; day++ {
+		start := now.AddDate(0, 0, -day)
+		for d := 0.0; d < line.Length(); d += 500 {
+			lat, lng := alongR1(line, d)
+			fixes = append(fixes, store.Fix{RouteCode: "133", BusCode: "C1",
+				AtMs: start.Add(time.Duration(d/10) * time.Second).UnixMilli(),
+				Lat:  lat, Lng: lng, SnapLat: &lat, SnapLng: &lng})
+		}
+	}
+	if err := db.InsertFixes(t.Context(), fixes); err != nil {
+		t.Fatalf("InsertFixes: %v", err)
+	}
+
+	tt := &countingTimetables{generation: 1, own: map[string]bool{"2026-09-03": true}, asked: map[string]int{}}
+	job := NewJob(db, ref, slog.New(slog.NewTextHandler(io.Discard, nil))).UseTimetables(tt)
+	job.Backfill(t.Context(), now)
+	job.Backfill(t.Context(), now.Add(Interval))
+	if tt.asked["2026-09-02"] != 1 {
+		t.Fatalf("2026-09-02 derived %d times before anything changed, want 1", tt.asked["2026-09-02"])
+	}
+
+	tt.generation = 2
+	job.Backfill(t.Context(), now.Add(2*Interval))
+	if tt.asked["2026-09-02"] != 2 {
+		t.Errorf("stand-in day derived %d times after the timetables improved, want 2", tt.asked["2026-09-02"])
+	}
+	if tt.asked["2026-09-03"] != 1 {
+		t.Errorf("day with its own timetable derived %d times, want 1", tt.asked["2026-09-03"])
 	}
 }

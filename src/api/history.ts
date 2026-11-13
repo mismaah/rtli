@@ -53,6 +53,42 @@ export interface RouteHistory {
    * and `segmentSecs` above is what a caller falls back to for the rest.
    */
   segmentSecsByHour?: Record<string, Record<string, number>>;
+  /**
+   * Average wait in minutes for a rider who turns up at random: sum(h²)/2·sum(h)
+   * over the observed gaps. Longer than half the headway whenever service is
+   * uneven, because a rider is likelier to land in a long gap than a short one.
+   */
+  waitMin?: number;
+  waitByHour?: Record<string, number>;
+  /**
+   * Minutes ahead of its timetable this route runs at the server's early
+   * quantile (15%): how soon before the printed time a rider must be at the
+   * stop to catch all but that share of buses. Zero when it does not run early.
+   */
+  earlyMin?: number;
+  earlyByHour?: Record<string, number>;
+  /** How many of the summary's `days` this route was seen running at all. */
+  activeDays?: number;
+  /**
+   * Share of `days` (0–1) on which the route was seen in each hour of the Malé
+   * day. An absent hour was never seen.
+   */
+  activeByHour?: Record<string, number>;
+  /** The hourly figures again per day type: "week" (Sun–Thu), "fri", "sat". */
+  dayTypes?: Partial<Record<DayType, DayTypeHistory>>;
+}
+
+/** Sun–Thu, Friday, Saturday: the Maldivian week runs three kinds of service. */
+export type DayType = 'week' | 'fri' | 'sat';
+
+/** One day type's figures, on the same terms as the pooled ones. */
+export interface DayTypeHistory {
+  activeDays: number;
+  activeByHour?: Record<string, number>;
+  headwayByHour?: Record<string, number>;
+  waitByHour?: Record<string, number>;
+  latenessByHour?: Record<string, number>;
+  earlyByHour?: Record<string, number>;
 }
 
 export interface HistorySummary {
@@ -60,6 +96,14 @@ export interface HistorySummary {
   fromMs: number;
   /** Keyed by route code ("133"), not route number ("R1"). */
   routes: Record<string, RouteHistory>;
+  /**
+   * Whole service days the recorder observed. A route absent from `routes`
+   * when this is large is a route that was not seen running at all. Absent
+   * from servers that predate it.
+   */
+  days?: number;
+  /** `days` split by day type. */
+  dayTypeDays?: Partial<Record<DayType, number>>;
 }
 
 /**

@@ -143,7 +143,7 @@ func TestQueryArgsAndLimit(t *testing.T) {
 func TestQueryRendersBlobs(t *testing.T) {
 	writer, reader := pair(t)
 	// PutTimetable gzips its payload, so this lands as a real BLOB.
-	if err := writer.PutTimetable(t.Context(), "2026-09-01", []byte(strings.Repeat("x", 64<<10))); err != nil {
+	if err := writer.PutTimetable(t.Context(), "2026-09-01", []byte(strings.Repeat("x", 64<<10)), 0, false); err != nil {
 		t.Fatal(err)
 	}
 

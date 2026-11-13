@@ -100,10 +100,18 @@ CREATE INDEX IF NOT EXISTS headway_obs_at     ON headway_obs (at_ms);
 
 -- The merged full-day timetable per service date. This is what lets a phone
 -- opening the app at 19:00 see the whole day instead of only what remains of it.
+--
+-- RTL only ever returns departures still to come, so a day is only whole if it
+-- was first captured before its first departure. complete records that, and
+-- first_ms when the capture began: a day first seen at 07:15 is missing its
+-- morning, and measuring lateness against it leaves every early arrival
+-- unmatched — which is what the first deployment did for two months.
 CREATE TABLE IF NOT EXISTS day_timetable (
   service_date TEXT    PRIMARY KEY, -- YYYY-MM-DD, Malé civil date
   updated_ms   INTEGER NOT NULL,
-  payload      BLOB    NOT NULL     -- RouteDetailsResponse JSON, gzip'd
+  payload      BLOB    NOT NULL,    -- RouteDetailsResponse JSON, gzip'd
+  first_ms     INTEGER NOT NULL DEFAULT 0,
+  complete     INTEGER NOT NULL DEFAULT 0
 );
 
 -- Which routes reported any movement on a given day, so a route that simply is

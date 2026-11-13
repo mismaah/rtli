@@ -83,6 +83,8 @@ export const dv: Catalog = {
   legSummary: "{stops} · {dist} · {duration}",
   busNumbered: "ބަސް {code}",
   noTimetableEstimated: "ޝެޑިއުލެއް ނެތް — ލަފާކުރެވޭ ވަގުތު",
+  oftenEarly: "ގިނައިން ކުރިން އަންނަ ބަހެއް — {time} ގެ ކުރިން ސްޓޮޕަށް ދާށެވެ",
+  usuallyLate: "އާންމުކޮށް ގާތްގަނޑަކަށް {n} މިނެޓު ލަސްވޭ",
   stopCode: "ސްޓޮޕް {code}",
   startHere: "މިތަނުން ފަށާ",
   goHere: "މިތަނަށް ދާން",

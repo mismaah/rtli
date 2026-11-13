@@ -102,6 +102,16 @@ type Server struct {
 	adminRate   *rateLimiter
 	readDB      *store.DB
 	logs        *logbuf.Buffer
+
+	// Optional: accumulates the day's whole timetable so /v1/graph serves
+	// every departure seen today, not only the ones still to come.
+	timetables TimetableMerger
+}
+
+// TimetableMerger folds a routedetails response into the day's accumulated
+// timetable. Satisfied by *timetable.Book.
+type TimetableMerger interface {
+	Merge(ctx context.Context, details rtl.RouteDetails, at time.Time) rtl.RouteDetails
 }
 
 // LiveTracks is the poller's read side, kept as an interface so the API package
@@ -141,6 +151,9 @@ type Options struct {
 	Logs *logbuf.Buffer
 	// Version identifies the running build in admin status.
 	Version string
+	// Timetables, when set, makes /v1/graph serve the whole day's timetable
+	// and is what the rollup measures lateness against.
+	Timetables TimetableMerger
 }
 
 func NewServer(opts Options) *Server {
@@ -176,6 +189,7 @@ func NewServer(opts Options) *Server {
 		adminKeys:   opts.AdminKeys,
 		readDB:      opts.ReadDB,
 		logs:        opts.Logs,
+		timetables:  opts.Timetables,
 		adminNonces: newNonceCache(adminNonceWindow),
 		adminRate:   &rateLimiter{limit: adminRatePerMinute},
 	}
@@ -301,6 +315,14 @@ func (s *Server) loadGraph(ctx context.Context) (json.RawMessage, error) {
 	details, err := s.rtl.RouteDetails(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if s.timetables != nil {
+		// The same shape with the morning put back: RTL lists only departures
+		// still to come, and this is the one place that saw them listed. The
+		// client merges by trip number exactly as before, so a union it already
+		// had is a no-op and one it did not is the whole point.
+		merged := s.timetables.Merge(ctx, *details, time.Now())
+		return json.Marshal(&merged)
 	}
 	return json.Marshal(details)
 }

@@ -600,3 +600,38 @@ func newFront(t *testing.T, srv *Server) string {
 	t.Cleanup(front.Close)
 	return front.URL
 }
+
+// stubMerger adds a departure RTL no longer lists, as the day's timetable
+// would once that bus had left.
+type stubMerger struct{}
+
+func (stubMerger) Merge(_ context.Context, details rtl.RouteDetails, _ time.Time) rtl.RouteDetails {
+	out := details
+	out.RouteResponse = append([]rtl.Route(nil), details.RouteResponse...)
+	stops := append([]rtl.Stop(nil), out.RouteResponse[0].BusRouteStopList...)
+	stops[0].Timings = append([]rtl.Timing{{Order: 1, Timing: "05:00:00"}}, stops[0].Timings...)
+	out.RouteResponse[0].BusRouteStopList = stops
+	return out
+}
+
+// With a timetable book, /v1/graph serves the day so far as well as what is
+// still to come — in the same shape, so the client needs no change to use it.
+func TestGraphServesTheMergedDay(t *testing.T) {
+	upstream := newFakeUpstream(t)
+	srv := NewServer(Options{RTL: rtl.NewClient(upstream.server.URL), Timetables: stubMerger{}})
+	front := httptest.NewServer(srv.Handler())
+	t.Cleanup(front.Close)
+
+	_, body := get(t, front.URL+"/v1/graph", nil)
+	var details rtl.RouteDetails
+	if err := json.Unmarshal(body, &details); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	timings := details.RouteResponse[0].BusRouteStopList[0].Timings
+	if len(timings) != 2 || timings[0].Timing != "05:00:00" {
+		t.Errorf("timings = %+v, want the merged 05:00 departure ahead of RTL's 16:45", timings)
+	}
+	if !strings.Contains(string(body), `"latitude":"4.169366"`) {
+		t.Error("merging changed the coordinate encoding")
+	}
+}

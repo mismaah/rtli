@@ -14,6 +14,17 @@ import (
 // figure is that a thin bucket can be declined rather than silently trusted.
 const MinSamples = 5
 
+// MinQuantileSamples is the floor for a tail figure. A median of five is a
+// rough middle; the 15th percentile of five is one bus.
+const MinQuantileSamples = 20
+
+// EarlyQuantile is the share of buses a rider standing at the stop by the
+// served buffer would still miss by turning up then. At 0.15 the buffer on R1
+// and R2 comes out around six and a half minutes, which is what it takes: a
+// quarter of their buses reach a stop five minutes or more ahead of the
+// timetable.
+const EarlyQuantile = 0.15
+
 // Bounds on a whole ride, from one bus's arrival at one stop to its arrival at
 // another in the same pass.
 const (
@@ -51,6 +62,24 @@ type HistorySummary struct {
 	FromMs int64 `json:"fromMs"`
 	// Routes is keyed by route code ("133"), not route number ("R1").
 	Routes map[string]*RouteHistory `json:"routes"`
+	// Days is how many whole service days the recorder observed in the
+	// window, which is what the activity shares below are fractions of. A
+	// route missing from Routes on a server with plenty of Days is a route that
+	// was not seen running at all.
+	Days int `json:"days"`
+	// DayTypeDays splits Days by day type: "week", "fri", "sat".
+	DayTypeDays map[string]int `json:"dayTypeDays,omitempty"`
+}
+
+// DayTypeHistory is a route's figures for one day type — Sun–Thu, Friday or
+// Saturday — on the same terms as the pooled ones on RouteHistory.
+type DayTypeHistory struct {
+	ActiveDays     int                `json:"activeDays"`
+	ActiveByHour   map[string]float64 `json:"activeByHour,omitempty"`
+	HeadwayByHour  map[string]float64 `json:"headwayByHour,omitempty"`
+	WaitByHour     map[string]float64 `json:"waitByHour,omitempty"`
+	LatenessByHour map[string]float64 `json:"latenessByHour,omitempty"`
+	EarlyByHour    map[string]float64 `json:"earlyByHour,omitempty"`
 }
 
 // RouteHistory is one route's measured behaviour.
@@ -78,6 +107,35 @@ type RouteHistory struct {
 	LatenessByHour map[string]float64 `json:"latenessByHour,omitempty"`
 	// LatenessSamples is how many matched arrivals fed LatenessByHour.
 	LatenessSamples int `json:"latenessSamples"`
+
+	// WaitMin is the average wait for a rider who turns up at random, in
+	// minutes: sum(h²) / 2·sum(h) over the observed gaps h. Not half the
+	// median gap. Riders are more likely to arrive during a long gap than a
+	// short one, so uneven service makes the real wait longer than an even
+	// headway would suggest — on R10 7.5 minutes against 5.8 from the average
+	// gap, and more against the median.
+	WaitMin    *float64           `json:"waitMin,omitempty"`
+	WaitByHour map[string]float64 `json:"waitByHour,omitempty"`
+
+	// EarlyMin is how many minutes ahead of its timetable this route runs at
+	// the EarlyQuantile — the margin a rider needs to be at the stop by to
+	// catch all but that share of buses. Zero when it does not run early.
+	// Absent for routes with no timetable or too few matched arrivals.
+	EarlyMin    *float64           `json:"earlyMin,omitempty"`
+	EarlyByHour map[string]float64 `json:"earlyByHour,omitempty"`
+
+	// ActiveDays is how many of the summary's Days this route was seen
+	// arriving at a stop at all.
+	ActiveDays int `json:"activeDays"`
+	// ActiveByHour is the share of Days on which the route was seen in each
+	// hour of the Malé day, 0–1. An hour that is absent was never seen. This is
+	// what says R12 has stopped by 19:00 and R11 is not running at all — which
+	// neither its missing timetable nor a headway can say.
+	ActiveByHour map[string]float64 `json:"activeByHour,omitempty"`
+
+	// DayTypes holds the same hourly figures per day type, keyed "week", "fri"
+	// and "sat", for the types observed.
+	DayTypes map[string]*DayTypeHistory `json:"dayTypes,omitempty"`
 
 	// SegmentSecs is the median ride between adjacent stops, keyed
 	// "fromStop>toStop". This is what replaces assuming an average speed: a
@@ -137,38 +195,49 @@ func (db *DB) History(ctx context.Context, fromMs, nowMs int64) (*HistorySummary
 		return r
 	}
 
+	dayType := func(code, kind string) *DayTypeHistory {
+		r := route(code)
+		if r.DayTypes == nil {
+			r.DayTypes = map[string]*DayTypeHistory{}
+		}
+		d, ok := r.DayTypes[kind]
+		if !ok {
+			d = &DayTypeHistory{}
+			r.DayTypes[kind] = d
+		}
+		return d
+	}
+
 	// Headways. Different-bus waits and same-bus laps are collected separately
 	// and never mixed: a route with both is a route where the laps are lapping
 	// past other buses, and only the real waits describe a rider's experience.
-	waits := map[string][]float64{}
-	laps := map[string][]float64{}
-	waitsByHour := map[string]map[int][]float64{}
-	lapsByHour := map[string]map[int][]float64{}
+	waits := map[string]*samples{}
+	laps := map[string]*samples{}
 
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT route_code, hour, secs, same_bus
+		SELECT route_code, at_ms, hour, secs, same_bus
 		FROM headway_obs WHERE at_ms >= ?`, fromMs)
 	if err != nil {
 		return nil, fmt.Errorf("history headways: %w", err)
 	}
 	for rows.Next() {
 		var code string
+		var atMs int64
 		var hour int
 		var secs float64
 		var sameBus bool
-		if err := rows.Scan(&code, &hour, &secs, &sameBus); err != nil {
+		if err := rows.Scan(&code, &atMs, &hour, &secs, &sameBus); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("history headways: %w", err)
 		}
-		into, byHour := waits, waitsByHour
+		into := waits
 		if sameBus {
-			into, byHour = laps, lapsByHour
+			into = laps
 		}
-		into[code] = append(into[code], secs)
-		if byHour[code] == nil {
-			byHour[code] = map[int][]float64{}
+		if into[code] == nil {
+			into[code] = newSamples()
 		}
-		byHour[code][hour] = append(byHour[code][hour], secs)
+		into[code].add(DayType(ServiceDateAt(atMs)), hour, secs)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -176,55 +245,87 @@ func (db *DB) History(ctx context.Context, fromMs, nowMs int64) (*HistorySummary
 	}
 
 	for code := range union(waits, laps) {
-		r := route(code)
-		samples, byHour, isLap := waits[code], waitsByHour[code], false
-		if len(samples) < MinSamples && len(laps[code]) >= MinSamples {
-			samples, byHour, isLap = laps[code], lapsByHour[code], true
+		set, isLap := waits[code], false
+		if set.size() < MinSamples && laps[code].size() >= MinSamples {
+			set, isLap = laps[code], true
 		}
-		if len(samples) < MinSamples {
+		if set.size() < MinSamples {
 			continue
 		}
-		minutes := median(samples) / 60
+		r := route(code)
+		minutes := median(set.all) / 60
 		r.HeadwayMin = &minutes
-		r.HeadwaySamples = len(samples)
+		r.HeadwaySamples = len(set.all)
 		r.HeadwayIsLap = isLap
-		r.HeadwayByHour = hourlyMedians(byHour, 1.0/60)
+		r.HeadwayByHour = hourlyMedians(set.byHour, 1.0/60)
+		wait := round1(expectedWait(set.all) / 60)
+		r.WaitMin = &wait
+		r.WaitByHour = hourlyReduce(set.byHour, MinSamples, func(v []float64) float64 { return expectedWait(v) / 60 })
+		for kind, byHour := range set.byType {
+			headway := hourlyMedians(byHour, 1.0/60)
+			waitByHour := hourlyReduce(byHour, MinSamples, func(v []float64) float64 { return expectedWait(v) / 60 })
+			if headway == nil && waitByHour == nil {
+				continue
+			}
+			d := dayType(code, kind)
+			d.HeadwayByHour, d.WaitByHour = headway, waitByHour
+		}
 	}
 
-	// Lateness against the published timetable.
-	lateness := map[string]map[int][]float64{}
-	counts := map[string]int{}
+	// Lateness against the published timetable: the median, which says how
+	// late a bus typically is, and the early tail, which says how soon a rider
+	// has to be there not to miss it.
+	lateness := map[string]*samples{}
 	rows, err = db.sql.QueryContext(ctx, `
-		SELECT route_code, hour, delta_min
+		SELECT route_code, at_ms, hour, delta_min
 		FROM stop_arrival WHERE at_ms >= ? AND delta_min IS NOT NULL`, fromMs)
 	if err != nil {
 		return nil, fmt.Errorf("history lateness: %w", err)
 	}
 	for rows.Next() {
 		var code string
+		var atMs int64
 		var hour int
 		var delta float64
-		if err := rows.Scan(&code, &hour, &delta); err != nil {
+		if err := rows.Scan(&code, &atMs, &hour, &delta); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("history lateness: %w", err)
 		}
 		if lateness[code] == nil {
-			lateness[code] = map[int][]float64{}
+			lateness[code] = newSamples()
 		}
-		lateness[code][hour] = append(lateness[code][hour], delta)
-		counts[code]++
+		lateness[code].add(DayType(ServiceDateAt(atMs)), hour, delta)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("history lateness: %w", err)
 	}
-	for code, byHour := range lateness {
-		if counts[code] < MinSamples {
+	for code, set := range lateness {
+		if set.size() < MinSamples {
 			continue
 		}
 		r := route(code)
-		r.LatenessByHour = hourlyMedians(byHour, 1)
-		r.LatenessSamples = counts[code]
+		r.LatenessByHour = hourlyMedians(set.byHour, 1)
+		r.LatenessSamples = set.size()
+		if set.size() >= MinQuantileSamples {
+			early := earliness(set.all)
+			r.EarlyMin = &early
+		}
+		r.EarlyByHour = hourlyReduce(set.byHour, MinQuantileSamples, earliness)
+		for kind, byHour := range set.byType {
+			late := hourlyMedians(byHour, 1)
+			early := hourlyReduce(byHour, MinQuantileSamples, earliness)
+			if late == nil && early == nil {
+				continue
+			}
+			d := dayType(code, kind)
+			d.LatenessByHour, d.EarlyByHour = late, early
+		}
+	}
+
+	// When each route runs at all.
+	if err := db.activity(ctx, fromMs, nowMs, out, route, dayType); err != nil {
+		return nil, err
 	}
 
 	// Ride times between adjacent stops, pooled across the day and again per
@@ -401,6 +502,187 @@ func collectRides(arrivals []rideArrival, into map[string][]float64) {
 		run = append(run, arrival)
 	}
 	flush()
+}
+
+// samples collects one route's observations pooled, per hour, and per day
+// type and hour.
+type samples struct {
+	all    []float64
+	byHour map[int][]float64
+	byType map[string]map[int][]float64
+}
+
+func newSamples() *samples {
+	return &samples{byHour: map[int][]float64{}, byType: map[string]map[int][]float64{}}
+}
+
+func (s *samples) add(dayType string, hour int, value float64) {
+	s.all = append(s.all, value)
+	s.byHour[hour] = append(s.byHour[hour], value)
+	if s.byType[dayType] == nil {
+		s.byType[dayType] = map[int][]float64{}
+	}
+	s.byType[dayType][hour] = append(s.byType[dayType][hour], value)
+}
+
+// size tolerates a nil set, which is what a route with only laps has for
+// waits and vice versa.
+func (s *samples) size() int {
+	if s == nil {
+		return 0
+	}
+	return len(s.all)
+}
+
+// activity fills in how many days each route ran and in which hours.
+//
+// Read from the arrivals at hour resolution — one row per route per clock hour
+// it was seen in, a few thousand rows for four weeks — so this is cheap beside
+// the passes above. Only whole service days count: the first day of the window
+// is cut off partway, and today has not finished, and either would read as a
+// route that stopped early.
+func (db *DB) activity(ctx context.Context, fromMs, nowMs int64, out *HistorySummary,
+	route func(string) *RouteHistory, dayType func(string, string) *DayTypeHistory) error {
+
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT DISTINCT route_code, at_ms / 3600000
+		FROM stop_arrival WHERE at_ms >= ?`, fromMs)
+	if err != nil {
+		return fmt.Errorf("history activity: %w", err)
+	}
+	type slot struct {
+		date string
+		hour int
+	}
+	seen := map[string]map[slot]bool{}
+	dates := map[string]bool{}
+	firstDate, today := ServiceDateAt(fromMs), ServiceDateAt(nowMs)
+	firstIsWhole := ServiceDateAt(fromMs-1) != firstDate
+	for rows.Next() {
+		var code string
+		var hourIndex int64
+		if err := rows.Scan(&code, &hourIndex); err != nil {
+			rows.Close()
+			return fmt.Errorf("history activity: %w", err)
+		}
+		mid := hourIndex*3600000 + 1800000
+		date := ServiceDateAt(mid)
+		if date == today || (date == firstDate && !firstIsWhole) {
+			continue
+		}
+		_, hour := maleBucket(mid)
+		if seen[code] == nil {
+			seen[code] = map[slot]bool{}
+		}
+		seen[code][slot{date, hour}] = true
+		dates[date] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("history activity: %w", err)
+	}
+
+	out.Days = len(dates)
+	typeDays := map[string]int{}
+	for date := range dates {
+		typeDays[DayType(date)]++
+	}
+	if len(typeDays) > 0 {
+		out.DayTypeDays = typeDays
+	}
+
+	for code, slots := range seen {
+		activeDates := map[string]bool{}
+		byHour := map[int]int{}
+		byTypeHour := map[string]map[int]int{}
+		typeDates := map[string]map[string]bool{}
+		for s := range slots {
+			kind := DayType(s.date)
+			activeDates[s.date] = true
+			byHour[s.hour]++
+			if byTypeHour[kind] == nil {
+				byTypeHour[kind] = map[int]int{}
+				typeDates[kind] = map[string]bool{}
+			}
+			byTypeHour[kind][s.hour]++
+			typeDates[kind][s.date] = true
+		}
+		r := route(code)
+		r.ActiveDays = len(activeDates)
+		r.ActiveByHour = shares(byHour, out.Days)
+		for kind, hours := range byTypeHour {
+			d := dayType(code, kind)
+			d.ActiveDays = len(typeDates[kind])
+			d.ActiveByHour = shares(hours, typeDays[kind])
+		}
+	}
+	return nil
+}
+
+// shares turns per-hour day counts into fractions of total, to two places.
+func shares(counts map[int]int, total int) map[string]float64 {
+	if total == 0 || len(counts) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(counts))
+	for hour, n := range counts {
+		out[fmt.Sprintf("%d", hour)] = float64(int64(float64(n)/float64(total)*100+0.5)) / 100
+	}
+	return out
+}
+
+// expectedWait is the mean wait for a passenger arriving at random across a
+// sequence of gaps: sum(h²) / 2·sum(h). Units are those of the gaps.
+func expectedWait(gaps []float64) float64 {
+	var sum, squares float64
+	for _, h := range gaps {
+		sum += h
+		squares += h * h
+	}
+	if sum <= 0 {
+		return 0
+	}
+	return squares / (2 * sum)
+}
+
+// earliness is how far ahead of the timetable the EarlyQuantile of arrivals
+// ran, in minutes, as a non-negative number.
+func earliness(deltas []float64) float64 {
+	q := quantile(deltas, EarlyQuantile)
+	if q >= 0 {
+		return 0
+	}
+	return round1(-q)
+}
+
+// quantile sorts in place and interpolates linearly between ranks.
+func quantile(values []float64, q float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sort.Float64s(values)
+	pos := q * float64(len(values)-1)
+	lower := int(pos)
+	if lower >= len(values)-1 {
+		return values[len(values)-1]
+	}
+	frac := pos - float64(lower)
+	return values[lower] + frac*(values[lower+1]-values[lower])
+}
+
+// hourlyReduce is hourlyMedians with any reduction and floor.
+func hourlyReduce(byHour map[int][]float64, floor int, reduce func([]float64) float64) map[string]float64 {
+	out := map[string]float64{}
+	for hour, values := range byHour {
+		if len(values) < floor {
+			continue
+		}
+		out[fmt.Sprintf("%d", hour)] = round1(reduce(values))
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // hourlyMedians reduces per-hour observations to medians, dropping the hours

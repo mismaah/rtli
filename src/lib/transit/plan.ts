@@ -1,5 +1,10 @@
 import { walkMeters, walkSeconds } from '@/lib/geo';
-import { headwayMinutesAt } from './applyHistory';
+import {
+  earlyBufferAt,
+  runsAt,
+  typicalLateMinAt,
+  waitMinutesAt,
+} from './applyHistory';
 import {
   DEFAULT_HEADWAY_MIN,
   estimateRideMinutes,
@@ -150,6 +155,8 @@ interface ViaBus {
   estimated: boolean;
   /** Set when `departAt` is a reported arrival rather than a timetable time. */
   live?: LiveEta;
+  /** When to be at the stop, on a route that often runs early. */
+  boardBy?: number;
 }
 
 /**
@@ -482,11 +489,16 @@ export function refreshItinerary(
     // The transfer buffer is owed to a connection made within this stretch, not
     // to one the rider has already made: someone standing at the stop having got
     // off a bus ten minutes ago needs no time to walk across it.
+    // A rider already standing at this leg's stop is waiting for whatever
+    // comes next, so the early-running margin — which is about getting there in
+    // time — no longer applies to them.
+    const waiting = options.fromLeg != null && i === from;
     const retimed = retimeBusLeg(
       graph,
       leg,
       readyAt + (ridden ? MIN_TRANSFER_MIN : 0),
       options.liveEtas?.get(leg.route.code),
+      { buffered: !waiting },
     );
     if (!retimed) return null;
 
@@ -508,6 +520,7 @@ function retimeBusLeg(
   leg: BusLeg,
   readyAt: number,
   live?: Map<StopCode, LiveEta>,
+  options: EarliestTripOptions = {},
 ): BusLeg | null {
   // The graph's own route, so a leg captured before the recorder's measurements
   // landed is re-timed on them rather than on what it was planned with.
@@ -519,7 +532,7 @@ function retimeBusLeg(
   // than the one it boarded at, exactly as `reconstruct` unwraps it.
   const alightIndex = alight <= boardIndex ? alight + route.stops.length : alight;
 
-  const trip = earliestTrip(route, boardIndex, readyAt, live?.get(leg.boardStop.code));
+  const trip = earliestTrip(route, boardIndex, readyAt, live?.get(leg.boardStop.code), options);
   if (!trip) return null;
 
   // Standing at the boarding stop, having walked no further to be there: the
@@ -534,13 +547,16 @@ function retimeBusLeg(
   const arrival = arrivalAt(graph, route, trip, boardIndex, alightIndex, standing);
   if (!arrival) return null;
 
+  const departAt = departureAt(trip, boardIndex, standing);
+  const { boardBy: _boardBy, typicalLateMin: _typicalLateMin, ...rest } = leg;
   return {
-    ...leg,
+    ...rest,
     route,
-    departAt: departureAt(trip, boardIndex, standing),
+    departAt,
     arriveAt: arrival.at,
     estimated: arrival.estimated,
     liveEta: trip.live,
+    ...reliabilityOf(route, departAt, arrival.estimated, trip.live, boardByOf(trip, departAt)),
   };
 }
 
@@ -549,6 +565,8 @@ function sameTiming(before: BusLeg, after: BusLeg): boolean {
   return (
     before.departAt === after.departAt &&
     before.arriveAt === after.arriveAt &&
+    before.boardBy === after.boardBy &&
+    before.typicalLateMin === after.typicalLateMin &&
     before.estimated === after.estimated &&
     // The countdown itself, so a badge reading "in 4 minutes" does not sit there
     // saying it while the bus arrives.
@@ -646,6 +664,7 @@ function relaxRoute(
           departAt: departureAt(boarding.trip, boarding.index, boarding.label),
           estimated: arrival.estimated,
           live: boarding.trip.live,
+          boardBy: boardByOf(boarding.trip, departureAt(boarding.trip, boarding.index, boarding.label)),
         },
       };
       busArrivals.push(label);
@@ -788,7 +807,42 @@ interface TripView {
   /** The reading this trip was matched to, when it came from one. */
   live?: LiveEta;
   estimated: boolean;
-  headwayMin: number;
+  /**
+   * The modelled wait on a frequency route with no reported bus: how long after
+   * reaching the stop the rider can expect to board. Zero otherwise.
+   */
+  waitMin: number;
+  /**
+   * Minutes before the departure the rider has to be at the stop, because the
+   * route often runs early. Zero on a tracked bus and a route that keeps time.
+   */
+  earlyMin: number;
+}
+
+/** When to be at the stop for this trip, if earlier than it is due. */
+function boardByOf(trip: TripView, departAt: number): number | undefined {
+  return trip.earlyMin > 0 ? departAt - trip.earlyMin : undefined;
+}
+
+/**
+ * What a rider should be told about how this route keeps time: when to be at
+ * the stop if it runs early, and how late it usually is if that is worth
+ * saying. Neither applies to a tracked bus, whose time is an observation, nor
+ * to an estimated one, which has no timetable to be early or late against.
+ */
+function reliabilityOf(
+  route: Route,
+  departAt: number,
+  estimated: boolean,
+  live: LiveEta | undefined,
+  boardBy: number | undefined,
+): Pick<BusLeg, 'boardBy' | 'typicalLateMin'> {
+  if (live || estimated) return {};
+  const out: Pick<BusLeg, 'boardBy' | 'typicalLateMin'> = {};
+  if (boardBy != null) out.boardBy = boardBy;
+  const late = typicalLateMinAt(route.measured, departAt);
+  if (late != null) out.typicalLateMin = late;
+  return out;
 }
 
 /**
@@ -810,7 +864,9 @@ function earliestTrip(
   index: number,
   readyAt: number,
   live?: LiveEta,
+  options: EarliestTripOptions = {},
 ): TripView | null {
+  const buffered = options.buffered ?? true;
   const liveDepartAt = live?.expectedAt;
   const catchable = liveDepartAt != null && liveDepartAt >= readyAt;
 
@@ -818,23 +874,26 @@ function earliestTrip(
     // Frequency route: no timetable published, so a reported bus is the only
     // real departure there is. Failing that, assume a headway.
     const none = { times: [], elapsed: [], repairsBefore: [] };
-    return catchable
-      ? { ...none, shift: 0, liveDepartAt, live, estimated: true, headwayMin: 0 }
-      : {
-          ...none,
-          shift: 0,
-          estimated: true,
-          // The measured wait for this hour where the recorder has one, the
-          // route's assumption otherwise. Hour of day matters more here than
-          // anywhere else in the planner: a route every 15 minutes at 08:00 is
-          // not one every 15 minutes at 23:00, and the rider planning the late
-          // journey is the one who most needs the wait to be honest.
-          headwayMin: headwayMinutesAt(
-            route.measured,
-            readyAt,
-            route.headwayMin ?? DEFAULT_HEADWAY_MIN,
-          ),
-        };
+    if (catchable) {
+      return { ...none, shift: 0, liveDepartAt, live, estimated: true, waitMin: 0, earlyMin: 0 };
+    }
+    // Nothing reported, and the recorder has watched this route not running at
+    // this hour — or barely at all. Without this the planner would fill the
+    // silence with an assumed headway and send a rider to wait for R11, seen
+    // twice in 73 days, or for R12 at 22:00, three hours after it stops.
+    if (!runsAt(route.measured, readyAt)) return null;
+    return {
+      ...none,
+      shift: 0,
+      estimated: true,
+      // The measured wait for this hour where the recorder has one, the
+      // route's assumption otherwise. Hour of day matters more here than
+      // anywhere else in the planner: a route every 15 minutes at 08:00 is
+      // not one every 15 minutes at 23:00, and the rider planning the late
+      // journey is the one who most needs the wait to be honest.
+      waitMin: waitMinutesAt(route.measured, readyAt, route.headwayMin ?? DEFAULT_HEADWAY_MIN),
+      earlyMin: 0,
+    };
   }
 
   if (catchable) {
@@ -852,7 +911,8 @@ function earliestTrip(
         shift: liveDepartAt - matched.times[index]!,
         live,
         estimated: false,
-        headwayMin: 0,
+        waitMin: 0,
+        earlyMin: 0,
       };
     }
   }
@@ -861,7 +921,13 @@ function earliestTrip(
   let bestDeparture = Infinity;
   for (const t of route.trips) {
     const depart = t.times[index];
-    if (depart == null || depart < readyAt) continue;
+    if (depart == null) continue;
+    // On a route that often runs early, a bus is only catchable by a rider who
+    // is there that much before it is due. A quarter of R1's and R2's buses
+    // reach a stop five or more minutes ahead of the timetable, so planning to
+    // arrive on the printed minute misses one in four.
+    const early = buffered ? earlyBufferAt(route.measured, depart) : 0;
+    if (depart - early < readyAt) continue;
     if (depart < bestDeparture) {
       bestDeparture = depart;
       bestTrip = {
@@ -870,11 +936,22 @@ function earliestTrip(
         repairsBefore: t.repairsBefore,
         shift: 0,
         estimated: false,
-        headwayMin: 0,
+        waitMin: 0,
+        earlyMin: early,
       };
     }
   }
   return bestTrip;
+}
+
+interface EarliestTripOptions {
+  /**
+   * Whether to require the rider to be at the stop early on a route that runs
+   * early. True when planning; false for a rider already standing at the stop,
+   * for whom a bus that is due in two minutes is still the next bus even if
+   * the plan would not have sent them for it.
+   */
+  buffered?: boolean;
 }
 
 /**
@@ -903,7 +980,7 @@ function departureAt(trip: TripView, boardIndex: number, boardLabel: Label): num
   if (trip.times.length === 0) {
     // Frequency route: the reported bus, or the expected wait for a rider
     // turning up at random to a stop served every H minutes.
-    return trip.liveDepartAt ?? boardLabel.arriveAt + trip.headwayMin / 2;
+    return trip.liveDepartAt ?? boardLabel.arriveAt + trip.waitMin;
   }
   const scheduled = trip.times[boardIndex];
   return scheduled == null ? boardLabel.arriveAt : scheduled + trip.shift;
@@ -1045,6 +1122,7 @@ function reconstruct(graph: TransitGraph, end: Label, origin: Place): Leg[] | nu
         fare: route.fare,
         estimated: via.estimated,
         liveEta: via.live,
+        ...reliabilityOf(route, via.departAt, via.estimated, via.live, via.boardBy),
       });
       cursor = via.from;
     }
@@ -1082,7 +1160,11 @@ export function finalizeItinerary(legs: Leg[], id: string): Itinerary {
   const last = legs[legs.length - 1];
   const trailingWalkSec = last?.kind === 'walk' ? last.seconds : 0;
 
-  const departAt = firstBus ? firstBus.departAt - leadingWalkSec / 60 : 0;
+  // Leave in time to be at the stop when the rider has to be, which on a route
+  // that runs early is before the bus is due.
+  const departAt = firstBus
+    ? (firstBus.boardBy ?? firstBus.departAt) - leadingWalkSec / 60
+    : 0;
   const arriveAt = lastBus
     ? lastBus.arriveAt + trailingWalkSec / 60
     : walkLegs.reduce((sum, l) => sum + l.seconds / 60, 0);

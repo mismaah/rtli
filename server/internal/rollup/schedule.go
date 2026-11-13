@@ -47,10 +47,20 @@ type departure struct {
 // R11, R12 and R15 rather than an error: those routes have no timetable to be
 // measured against, and their history is the timetable.
 func NewSchedule(stops []rtl.Stop) *Schedule {
-	byStop := make(map[string][]departure)
+	byStop := make(map[string][]rtl.Timing, len(stops))
 	for _, s := range stops {
+		byStop[s.Code] = s.Timings
+	}
+	return NewScheduleFromTimings(byStop)
+}
+
+// NewScheduleFromTimings indexes departures already grouped by stop code — the
+// shape a merged day's timetable is kept in.
+func NewScheduleFromTimings(timings map[string][]rtl.Timing) *Schedule {
+	byStop := make(map[string][]departure)
+	for code, list := range timings {
 		var deps []departure
-		for _, t := range s.Timings {
+		for _, t := range list {
 			min, ok := parseClockMinutes(t.Timing)
 			if !ok {
 				continue
@@ -61,7 +71,7 @@ func NewSchedule(stops []rtl.Stop) *Schedule {
 			continue
 		}
 		sort.Slice(deps, func(i, j int) bool { return deps[i].Min < deps[j].Min })
-		byStop[s.Code] = deps
+		byStop[code] = deps
 	}
 	if len(byStop) == 0 {
 		return nil

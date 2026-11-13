@@ -154,7 +154,7 @@ func TestTimetableRoundTrip(t *testing.T) {
 		"routeResponse": []map[string]any{{"code": "133", "routeNumber": "R1"}},
 	})
 
-	if err := db.PutTimetable(t.Context(), "2026-09-01", payload); err != nil {
+	if err := db.PutTimetable(t.Context(), "2026-09-01", payload, 0, false); err != nil {
 		t.Fatalf("PutTimetable: %v", err)
 	}
 	got, err := db.GetTimetable(t.Context(), "2026-09-01")
@@ -181,10 +181,10 @@ func TestMissingTimetableIsNotAnError(t *testing.T) {
 func TestPutTimetableOverwritesSameDay(t *testing.T) {
 	db := openTest(t)
 	ctx := t.Context()
-	if err := db.PutTimetable(ctx, "2026-09-01", []byte(`{"v":1}`)); err != nil {
+	if err := db.PutTimetable(ctx, "2026-09-01", []byte(`{"v":1}`), 0, false); err != nil {
 		t.Fatalf("first put: %v", err)
 	}
-	if err := db.PutTimetable(ctx, "2026-09-01", []byte(`{"v":2}`)); err != nil {
+	if err := db.PutTimetable(ctx, "2026-09-01", []byte(`{"v":2}`), 0, false); err != nil {
 		t.Fatalf("second put: %v", err)
 	}
 	got, _ := db.GetTimetable(ctx, "2026-09-01")
@@ -247,7 +247,7 @@ func TestDeleteTimetable(t *testing.T) {
 	db := openTest(t)
 	ctx := t.Context()
 
-	if err := db.PutTimetable(ctx, "2026-09-01", []byte(`{"v":1}`)); err != nil {
+	if err := db.PutTimetable(ctx, "2026-09-01", []byte(`{"v":1}`), 0, false); err != nil {
 		t.Fatalf("PutTimetable: %v", err)
 	}
 	if err := db.DeleteTimetable(ctx, "2026-09-01"); err != nil {

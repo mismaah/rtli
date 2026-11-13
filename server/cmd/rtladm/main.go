@@ -183,7 +183,7 @@ func post(baseURL, userAgent string, signer ssh.Signer, op string, params map[st
 	// A header cannot carry a newline; the armour is base64 either way.
 	req.Header.Set(api.AdminSignatureHeader, strings.ReplaceAll(string(armored), "\n", ""))
 
-	res, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+	res, err := (&http.Client{Timeout: 100 * time.Second}).Do(req)
 	if err != nil {
 		return nil, err
 	}

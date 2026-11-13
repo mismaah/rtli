@@ -322,3 +322,158 @@ func TestHistoryRideRejectsLongSilences(t *testing.T) {
 		}
 	}
 }
+
+// A rider turning up at random waits sum(h²)/2·sum(h), not half the median
+// gap: they are far more likely to land in the 64-minute gap than in any of the
+// short ones.
+func TestHistoryWaitIsWhatARiderExperiences(t *testing.T) {
+	db := openTest(t)
+	var headways []Headway
+	for _, mins := range []float64{2, 3, 3, 4, 64} {
+		headways = append(headways, Headway{RouteCode: "122", StopCode: "A", AtMs: at(1, 8), Secs: mins * 60})
+	}
+	if err := db.ReplaceAggregates(t.Context(), "122", at(2, 0), at(0, 0), nil, nil, headways); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+	route := historyOf(t, db).Routes["122"]
+	if route == nil || route.WaitMin == nil {
+		t.Fatal("no wait for a route with five headways")
+	}
+	// (4+9+9+16+4096) / (2·76) = 27.2
+	if *route.WaitMin != 27.2 {
+		t.Errorf("waitMin = %v, want 27.2", *route.WaitMin)
+	}
+	if route.WaitByHour["8"] != 27.2 {
+		t.Errorf("waitByHour[8] = %v, want 27.2", route.WaitByHour["8"])
+	}
+}
+
+func matchedArrivals(code string, deltas []float64, atMs int64) []Arrival {
+	out := make([]Arrival, 0, len(deltas))
+	for i, delta := range deltas {
+		d := delta
+		trip := i
+		out = append(out, Arrival{RouteCode: code, StopCode: "A", BusCode: "C1",
+			AtMs: atMs + int64(i)*60000, TripOrder: &trip, DeltaMin: &d})
+	}
+	return out
+}
+
+// The early tail is what a rider has to allow for. A route that never runs
+// early needs no margin at all.
+func TestHistoryEarlinessIsTheEarlyTail(t *testing.T) {
+	db := openTest(t)
+	var spread []float64
+	for d := -10; d <= 10; d++ {
+		spread = append(spread, float64(d))
+	}
+	late := make([]float64, 21)
+	for i := range late {
+		late[i] = 3
+	}
+	if err := db.ReplaceAggregates(t.Context(), "133", at(2, 0), at(0, 0),
+		matchedArrivals("133", spread, at(1, 8)), nil, nil); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+	if err := db.ReplaceAggregates(t.Context(), "124", at(2, 0), at(0, 0),
+		matchedArrivals("124", late, at(1, 8)), nil, nil); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+
+	summary := historyOf(t, db)
+	// 21 values -10..10: the 15th percentile is rank 3, which is -7.
+	if r := summary.Routes["133"]; r == nil || r.EarlyMin == nil || *r.EarlyMin != 7 {
+		t.Errorf("133 earlyMin = %v, want 7", r.EarlyMin)
+	} else if r.EarlyByHour["8"] != 7 {
+		t.Errorf("133 earlyByHour[8] = %v, want 7", r.EarlyByHour["8"])
+	}
+	if r := summary.Routes["124"]; r == nil || r.EarlyMin == nil || *r.EarlyMin != 0 {
+		t.Errorf("124 earlyMin = %v, want 0 for a route always late", r.EarlyMin)
+	}
+}
+
+// Activity is what tells a route that has stopped for the evening, or never
+// runs, from one that is merely infrequent.
+func TestHistoryActivityShares(t *testing.T) {
+	db := openTest(t)
+	var busy, rare []Arrival
+	for day := 2; day <= 5; day++ {
+		busy = append(busy, Arrival{RouteCode: "133", StopCode: "A", BusCode: "C1", AtMs: at(day, 8)})
+	}
+	rare = append(rare, Arrival{RouteCode: "121", StopCode: "A", BusCode: "C9", AtMs: at(3, 8)})
+	// Today is not a whole day and must not count.
+	busy = append(busy, Arrival{RouteCode: "133", StopCode: "A", BusCode: "C1", AtMs: time.Now().UnixMilli() - 1000})
+
+	for code, arrivals := range map[string][]Arrival{"133": busy, "121": rare} {
+		if err := db.ReplaceAggregates(t.Context(), code, at(10, 0), time.Now().UnixMilli()+1, arrivals, nil, nil); err != nil {
+			t.Fatalf("ReplaceAggregates: %v", err)
+		}
+	}
+
+	summary := historyOf(t, db)
+	if summary.Days != 4 {
+		t.Fatalf("days = %d, want the 4 whole days observed", summary.Days)
+	}
+	total := 0
+	for _, n := range summary.DayTypeDays {
+		total += n
+	}
+	if total != 4 {
+		t.Errorf("dayTypeDays sum to %d, want 4", total)
+	}
+	busyRoute, rareRoute := summary.Routes["133"], summary.Routes["121"]
+	if busyRoute == nil || busyRoute.ActiveDays != 4 || busyRoute.ActiveByHour["8"] != 1 {
+		t.Errorf("133 = %+v, want active all 4 days at 08:00", busyRoute)
+	}
+	if rareRoute == nil || rareRoute.ActiveDays != 1 || rareRoute.ActiveByHour["8"] != 0.25 {
+		t.Errorf("121 = %+v, want active 1 day of 4", rareRoute)
+	}
+}
+
+// Friday and the working week are kept apart: pooled, they describe neither.
+func TestHistorySplitsByDayType(t *testing.T) {
+	db := openTest(t)
+	friday, weekday := -1, -1
+	for d := 1; d <= 8; d++ {
+		switch DayType(ServiceDateAt(at(d, 9))) {
+		case DayTypeFriday:
+			if friday < 0 {
+				friday = d
+			}
+		case DayTypeWeek:
+			if weekday < 0 {
+				weekday = d
+			}
+		}
+	}
+	var headways []Headway
+	for i := 0; i < 5; i++ {
+		headways = append(headways,
+			Headway{RouteCode: "145", StopCode: "A", AtMs: at(friday, 9) + int64(i), Secs: 600},
+			Headway{RouteCode: "145", StopCode: "A", AtMs: at(weekday, 9) + int64(i), Secs: 1800})
+	}
+	if err := db.ReplaceAggregates(t.Context(), "145", at(10, 0), at(0, 0), nil, nil, headways); err != nil {
+		t.Fatalf("ReplaceAggregates: %v", err)
+	}
+	route := historyOf(t, db).Routes["145"]
+	if route == nil || route.DayTypes == nil {
+		t.Fatal("no day-type split")
+	}
+	if got := route.DayTypes[DayTypeFriday].HeadwayByHour["9"]; got != 10 {
+		t.Errorf("Friday headway = %v, want 10", got)
+	}
+	if got := route.DayTypes[DayTypeWeek].HeadwayByHour["9"]; got != 30 {
+		t.Errorf("working-day headway = %v, want 30", got)
+	}
+}
+
+func TestServiceDateRollsBackBeforeFourAm(t *testing.T) {
+	// 00:30 Malé on the 14th is still the 13th's service day.
+	atMs := time.Date(2026, 11, 13, 19, 30, 0, 0, time.UTC).UnixMilli()
+	if got := ServiceDateAt(atMs); got != "2026-11-13" {
+		t.Errorf("ServiceDateAt(00:30 Malé 14th) = %s, want 2026-11-13", got)
+	}
+	if DayType("2026-11-13") != DayTypeFriday || DayType("2026-11-14") != DayTypeSaturday || DayType("2026-11-15") != DayTypeWeek {
+		t.Error("day types misclassified")
+	}
+}

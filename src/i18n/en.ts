@@ -102,6 +102,8 @@ export const en = {
   legSummary: '{stops} · {dist} · {duration}',
   busNumbered: 'bus {code}',
   noTimetableEstimated: 'No published timetable — estimated',
+  oftenEarly: 'Often early — be at the stop by {time}',
+  usuallyLate: 'Usually about {n} min late',
 
   // ---- Stop detail -----------------------------------------------------
   stopCode: 'Stop {code}',

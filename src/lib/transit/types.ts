@@ -83,8 +83,8 @@ export interface RouteMeasurements {
   headwayByHour?: Record<string, number>;
   /**
    * Median minutes late against the published timetable, per hour. Positive is
-   * late. Recorded and surfaced, but deliberately not applied to departure
-   * times; see the note in `plan.ts`.
+   * late. Surfaced on the leg as `typicalLateMin`, but deliberately not applied
+   * to departure times: the timetable stays the claim and this the caveat.
    */
   latenessByHour?: Record<string, number>;
   latenessSamples: number;
@@ -114,6 +114,29 @@ export interface RouteMeasurements {
    * always the fallback.
    */
   segmentMinByHour?: Record<string, Record<string, number>>;
+  /** Average wait in minutes for a rider arriving at random; see `waitMinutesAt`. */
+  waitMin?: number;
+  waitByHour?: Record<string, number>;
+  /** Minutes ahead of the timetable the route runs at its early tail; see `earlyBufferAt`. */
+  earlyMin?: number;
+  earlyByHour?: Record<string, number>;
+  /**
+   * When the route is seen running, present only where enough days were
+   * observed for an absence to mean something. See `runsAt`.
+   */
+  activity?: RouteActivity;
+  /** The day type the hourly figures were taken for, when they were split. */
+  dayType?: 'week' | 'fri' | 'sat';
+}
+
+/** How often a route was seen running, over the days the recorder watched. */
+export interface RouteActivity {
+  /** Days observed: the denominator of everything below. */
+  days: number;
+  /** Of those, how many the route was seen at all. */
+  activeDays: number;
+  /** Share of `days` on which it was seen in each hour, keyed "0".."23". */
+  byHour: Record<string, number>;
 }
 
 export interface WalkTransfer {
@@ -212,6 +235,17 @@ export interface BusLeg {
    * timetable says one should be.
    */
   liveEta?: LiveEta;
+  /**
+   * When to be at the boarding stop, on a route that is often early: some
+   * minutes before `departAt`. Absent when the route keeps to its timetable,
+   * when the departure is a tracked bus, or when nothing has been measured.
+   */
+  boardBy?: number;
+  /**
+   * How many minutes late this route typically runs at this hour, when that is
+   * enough to be worth saying. Surfaced only; `arriveAt` is not moved by it.
+   */
+  typicalLateMin?: number;
 }
 
 export type Leg = WalkLeg | BusLeg;

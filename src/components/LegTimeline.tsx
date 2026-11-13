@@ -88,6 +88,14 @@ export function LegTimeline({
                   {leg.estimated && (
                     <span className="text-amber-300">{t('noTimetableEstimated')}</span>
                   )}
+                  {leg.boardBy != null && (
+                    <span className="text-amber-300">
+                      {t('oftenEarly', { time: formatClock(leg.boardBy) })}
+                    </span>
+                  )}
+                  {leg.typicalLateMin != null && (
+                    <span className="text-ink-300">{t('usuallyLate', { n: leg.typicalLateMin })}</span>
+                  )}
                 </div>
               </div>
             )}

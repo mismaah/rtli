@@ -8,6 +8,7 @@ import (
 	"github.com/mismaah/rtl-improved/server/internal/geo"
 	"github.com/mismaah/rtl-improved/server/internal/rtl"
 	"github.com/mismaah/rtl-improved/server/internal/store"
+	"github.com/mismaah/rtl-improved/server/internal/timetable"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 	// service date's fixes span 04:00 through to 04:00 the next morning. Slicing
 	// at midnight would cut every night's last hour of running onto the wrong
 	// day and make an evening headway look like a morning one.
-	ServiceDayStartHour = 4
+	ServiceDayStartHour = store.ServiceDayStartHour
 )
 
 // Reference supplies what a rollup needs to know about a route beyond its
@@ -32,6 +33,15 @@ type Reference interface {
 	Routes() []string
 	RouteGeometry(routeCode string) ([][]geo.Point, bool)
 	RouteStops(routeCode string) ([]rtl.Stop, bool)
+}
+
+// Timetables supplies the timetable a service date's arrivals are measured
+// against. Satisfied by *timetable.Book.
+type Timetables interface {
+	For(ctx context.Context, serviceDate string) (timetable.Timings, timetable.Source, bool)
+	// Generation changes when a better stand-in may have become available for
+	// days that have no complete timetable of their own.
+	Generation() int
 }
 
 // Job derives aggregates from recorded fixes on a schedule.
@@ -56,13 +66,32 @@ type Job struct {
 	// measure that it is worth keeping between passes.
 	lines map[string]*Line
 
-	// swept records that the one-time backfill has run against a working
-	// reference, so it is retried until it can and then never repeated.
+	// swept records that the backfill has run against a working reference, so
+	// it is retried until it can and otherwise not repeated — unless the
+	// timetables improve, below.
 	swept bool
+
+	// timetables, when set, supplies each day's own timetable. Without it every
+	// day is measured against RTL's current snapshot, which lists only what is
+	// still to come today; see package timetable.
+	timetables Timetables
+	// ownTimetable records, per service date derived, whether it was measured
+	// against its own complete timetable. Days that were not are re-derived
+	// when the timetables' generation moves on.
+	ownTimetable map[string]bool
+	generation   int
 }
 
 func NewJob(db *store.DB, ref Reference, log *slog.Logger) *Job {
-	return &Job{store: db, ref: ref, log: log, done: map[string]bool{}, lines: map[string]*Line{}}
+	return &Job{store: db, ref: ref, log: log, done: map[string]bool{}, lines: map[string]*Line{},
+		ownTimetable: map[string]bool{}}
+}
+
+// UseTimetables measures each day against its own accumulated timetable
+// rather than whatever RTL lists at the moment the rollup runs.
+func (j *Job) UseTimetables(t Timetables) *Job {
+	j.timetables = t
+	return j
 }
 
 // MaxBackfillDays bounds a backfill, so a database whose raw retention has been
@@ -161,6 +190,25 @@ func (j *Job) resolvable() int {
 // each route's window before inserting, so a day derived twice ends up with one
 // copy, not two.
 func (j *Job) Backfill(ctx context.Context, now time.Time) {
+	// A day type has just gained its first complete timetable, so every day
+	// that was measured against a stand-in — or against RTL's partial snapshot —
+	// has something better to be measured against. Bounded: the generation only
+	// moves when the set of day types with a complete day grows, so at most
+	// three times over the life of the store, not daily.
+	if j.timetables != nil {
+		if generation := j.timetables.Generation(); generation != j.generation {
+			if j.swept {
+				for date, own := range j.ownTimetable {
+					if !own {
+						delete(j.done, date)
+					}
+				}
+				j.swept = false
+				j.log.Info("timetables improved; re-deriving days measured against a stand-in")
+			}
+			j.generation = generation
+		}
+	}
 	if !j.swept && j.resolvable() > 0 {
 		j.sweep(ctx, now)
 		j.swept = true
@@ -246,6 +294,26 @@ func (j *Job) rollUp(ctx context.Context, from, to time.Time) int {
 	started := time.Now()
 	var arrivals, segments, headways, routes int
 
+	serviceDate := ServiceDate(from)
+	var dayTimings timetable.Timings
+	source := "rtl snapshot"
+	if j.timetables != nil {
+		if timings, src, ok := j.timetables.For(ctx, serviceDate); ok {
+			dayTimings = timings
+			j.ownTimetable[serviceDate] = src.Own && src.Complete
+			switch {
+			case src.Own && src.Complete:
+				source = "own"
+			case src.Own:
+				source = "own, partial"
+			default:
+				source = "stand-in " + src.Date
+			}
+		} else {
+			j.ownTimetable[serviceDate] = false
+		}
+	}
+
 	for _, routeCode := range j.ref.Routes() {
 		select {
 		case <-ctx.Done():
@@ -256,6 +324,11 @@ func (j *Job) rollUp(ctx context.Context, from, to time.Time) int {
 		line, refs, sched, ok := j.reference(routeCode)
 		if !ok {
 			continue
+		}
+		if dayTimings != nil {
+			// The day's own departures. A route absent from them publishes no
+			// timetable, and a nil schedule is exactly right for it.
+			sched = NewScheduleFromTimings(dayTimings[routeCode])
 		}
 
 		fixes, err := j.store.FixesForRoute(ctx, routeCode, fromMs, toMs)
@@ -291,7 +364,7 @@ func (j *Job) rollUp(ctx context.Context, from, to time.Time) int {
 		return 0
 	}
 	j.log.Info("rollup pass complete",
-		"serviceDate", ServiceDate(from), "routes", routes,
+		"serviceDate", serviceDate, "routes", routes, "timetable", source,
 		"arrivals", arrivals, "segments", segments, "headways", headways,
 		"took", time.Since(started).Round(time.Millisecond))
 	return routes

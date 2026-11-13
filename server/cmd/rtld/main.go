@@ -30,6 +30,7 @@ import (
 	"github.com/mismaah/rtl-improved/server/internal/rtl"
 	"github.com/mismaah/rtl-improved/server/internal/sshsig"
 	"github.com/mismaah/rtl-improved/server/internal/store"
+	"github.com/mismaah/rtl-improved/server/internal/timetable"
 )
 
 func main() {
@@ -139,7 +140,14 @@ func main() {
 			// The rollup has to outlive nothing and precede everything: raw
 			// fixes are pruned at RawRetention and the aggregates derived from
 			// them are not, so a fix that expires unrolled is simply lost.
-			go rollup.NewJob(db, live, log).Run(ctx)
+			// Loaded before either consumer starts, so a restart mid-day resumes
+			// today's capture rather than beginning a new one missing its morning.
+			book := timetable.New(db, log)
+			if err := book.Load(ctx, time.Now()); err != nil {
+				log.Warn("could not load stored timetables; starting from today's capture", "err", err)
+			}
+			options.Timetables = book
+			go rollup.NewJob(db, live, log).UseTimetables(book).Run(ctx)
 
 			options.Hub = broker
 			options.Poller = live
@@ -219,7 +227,7 @@ func checkStore(ctx context.Context, path string) error {
 	}
 	defer db.Close()
 
-	if err := db.PutTimetable(ctx, "0000-00-00", []byte("{}")); err != nil {
+	if err := db.PutTimetable(ctx, "0000-00-00", []byte("{}"), 0, false); err != nil {
 		return fmt.Errorf("write test: %w", err)
 	}
 	return db.DeleteTimetable(ctx, "0000-00-00")

@@ -274,6 +274,18 @@ function Instruction({
           <span>{t('fare', { amount: bus.fare.toFixed(2) })}</span>
           <span>{t('getOffAt', { name: stopText(bus.alightStop, lang) })}</span>
         </div>
+        {!live && (bus.boardBy != null || bus.typicalLateMin != null) && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+            {bus.boardBy != null && (
+              <span className="text-amber-300">
+                {t('oftenEarly', { time: formatClock(bus.boardBy) })}
+              </span>
+            )}
+            {bus.typicalLateMin != null && (
+              <span className="text-ink-300">{t('usuallyLate', { n: bus.typicalLateMin })}</span>
+            )}
+          </div>
+        )}
 
         {live ? (
           <p

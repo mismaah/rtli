@@ -14,7 +14,7 @@ func male(hour, minute int) int64 {
 	return t.UnixMilli()
 }
 
-func timetable() []rtl.Stop {
+func sampleTimetable() []rtl.Stop {
 	return []rtl.Stop{{
 		Code: "A",
 		Timings: []rtl.Timing{
@@ -26,7 +26,7 @@ func timetable() []rtl.Stop {
 }
 
 func TestScheduleMatchesTheNearestTrip(t *testing.T) {
-	sched := NewSchedule(timetable())
+	sched := NewSchedule(sampleTimetable())
 	if sched == nil {
 		t.Fatal("NewSchedule returned nil for a route that publishes timings")
 	}
@@ -56,7 +56,7 @@ func TestScheduleMatchesTheNearestTrip(t *testing.T) {
 // most of a day early. Getting this wrong would put a wildly wrong delta into
 // the record for every late-night trip.
 func TestScheduleWrapsAtMidnight(t *testing.T) {
-	sched := NewSchedule(timetable())
+	sched := NewSchedule(sampleTimetable())
 	trip, _, delta, ok := sched.Match("A", male(0, 2))
 	if !ok {
 		t.Fatal("an arrival at 00:02 went unmatched against a 23:55 departure")
@@ -72,7 +72,7 @@ func TestScheduleWrapsAtMidnight(t *testing.T) {
 // Beyond the skew bound there is no telling which trip an arrival belongs to,
 // and guessing reports a very late bus as a slightly early one.
 func TestScheduleDeclinesADistantArrival(t *testing.T) {
-	sched := NewSchedule(timetable())
+	sched := NewSchedule(sampleTimetable())
 	if _, _, _, ok := sched.Match("A", male(12, 0)); ok {
 		t.Error("matched an arrival hours from any published departure")
 	}
@@ -100,7 +100,7 @@ func TestScheduleAbsentForAnUntimetabledRoute(t *testing.T) {
 }
 
 func TestAnnotateLabelsMatchedArrivals(t *testing.T) {
-	sched := NewSchedule(timetable())
+	sched := NewSchedule(sampleTimetable())
 	arrivals := []Arrival{
 		{StopCode: "A", BusCode: "B1", AtMs: male(6, 3)},
 		{StopCode: "A", BusCode: "B1", AtMs: male(12, 0)},

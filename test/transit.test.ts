@@ -99,7 +99,16 @@ import { useRecentTrips } from '@/store/recentTrips';
 import type { LiveBus } from '@/api/rtl';
 import type { RouteDetailsResponse } from '@/api/rtl';
 import type { HistorySummary } from '@/api/history';
-import { applyHistory, headwayMinutesAt } from '@/lib/transit/applyHistory';
+import {
+  applyHistory,
+  dayTypeOf,
+  earlyBufferAt,
+  headwayMinutesAt,
+  MAX_EARLY_BUFFER_MIN,
+  runsAt,
+  typicalLateMinAt,
+  waitMinutesAt,
+} from '@/lib/transit/applyHistory';
 import type { BusLeg, Itinerary, Place, TransitGraph, WalkLeg } from '@/lib/transit/types';
 import type { WalkPath } from '@/api/walking';
 
@@ -2445,5 +2454,261 @@ describe('riding on measured times', () => {
 
     const scheduled = rideMinutes(buildGraph(fixture as unknown as RouteDetailsResponse), from, to);
     expect(rideMinutes(graphWithRides({ [elsewhere]: 1 }), from, to)).toBe(scheduled);
+  });
+});
+
+describe('what the recorder says about when and how buses run', () => {
+  const NOON = 12 * 60;
+  const fresh = () => buildGraph(fixture as unknown as RouteDetailsResponse);
+  const R1 = [...fresh().routes.values()].find((r) => r.routeNumber === 'R1')!.code;
+
+  function withHistory(
+    g: TransitGraph,
+    routes: HistorySummary['routes'],
+    extra: Partial<HistorySummary> = {},
+  ): TransitGraph {
+    return applyHistory(g, { generatedAtMs: Date.now(), fromMs: 0, routes, ...extra });
+  }
+
+  /** The direct R1 ride from Maafannu Bus Terminal to Amin Avenue, if offered. */
+  function directR1(g: TransitGraph, departAt: number): { it: Itinerary; bus: BusLeg } | null {
+    for (const it of planJourney(g, stopPlace('103'), stopPlace('114'), { departAt })) {
+      const buses = it.legs.filter((l): l is BusLeg => l.kind === 'bus');
+      if (buses.length === 1 && buses[0].route.code === R1) return { it, bus: buses[0] };
+    }
+    return null;
+  }
+
+  /** Whether any itinerary between two stops of a route rides that route. */
+  function rides(g: TransitGraph, code: string, departAt: number): boolean {
+    const stops = g.routes.get(code)!.stops;
+    const from = g.stops.get(stops[0].stopCode)!;
+    const to = g.stops.get(stops[Math.min(4, stops.length - 1)].stopCode)!;
+    return planJourney(g, from, to, { departAt }).some((it) =>
+      it.legs.some((l) => l.kind === 'bus' && l.route.code === code),
+    );
+  }
+
+  describe('routes that are not running', () => {
+    it('offers a frequency route nothing is known about', () => {
+      expect(fresh().routes.get('121')!.trips).toHaveLength(0);
+      expect(rides(fresh(), '121', NOON)).toBe(true);
+    });
+
+    // R11: watched for weeks, seen twice. Offering it every 15 minutes sends a
+    // rider to wait for a bus that is not coming.
+    it('stops offering a route the recorder never saw running', () => {
+      const g = withHistory(fresh(), {}, { days: 28 });
+      expect(runsAt(g.routes.get('121')!.measured, NOON)).toBe(false);
+      expect(rides(g, '121', NOON)).toBe(false);
+    });
+
+    it('keeps the benefit of the doubt until enough days were watched', () => {
+      const g = withHistory(fresh(), {}, { days: 3 });
+      expect(rides(g, '121', NOON)).toBe(true);
+    });
+
+    // R12 runs until about 18:30. A missing 22:00 bucket used to fall back to
+    // the all-day median and offer it every 39 minutes.
+    it('stops offering a frequency route outside the hours it runs', () => {
+      const g = withHistory(
+        fresh(),
+        { '121': { headwaySamples: 0, latenessSamples: 0, activeDays: 25, activeByHour: { '8': 0.9, '19': 0.04 } } },
+        { days: 28 },
+      );
+      expect(rides(g, '121', 8 * 60 + 5)).toBe(true);
+      expect(rides(g, '121', 19 * 60 + 5)).toBe(false);
+      expect(rides(g, '121', 22 * 60)).toBe(false);
+    });
+
+    it('treats a route seen on a handful of days as not running', () => {
+      const g = withHistory(
+        fresh(),
+        { '121': { headwaySamples: 0, latenessSamples: 0, activeDays: 2, activeByHour: { '12': 0.07 } } },
+        { days: 28 },
+      );
+      expect(runsAt(g.routes.get('121')!.measured, NOON)).toBe(false);
+    });
+
+    it('still rides a reported bus on a route it thought had stopped', () => {
+      const g = withHistory(fresh(), {}, { days: 28 });
+      const route = g.routes.get('121')!;
+      const board = route.stops[0].stopCode;
+      const live: LiveEtaIndex = new Map([
+        ['121', new Map([[board, { minutes: 5, vehicleCode: 'X', kind: 'due' as const, expectedAt: NOON + 5 }]])],
+      ]);
+      const stops = route.stops;
+      const results = planJourney(g, g.stops.get(board)!, g.stops.get(stops[4].stopCode)!, {
+        departAt: NOON,
+        liveEtas: live,
+      });
+      expect(results.some((it) => it.legs.some((l) => l.kind === 'bus' && l.route.code === '121'))).toBe(true);
+    });
+  });
+
+  describe('waiting on a frequency route', () => {
+    const measured = {
+      headwayMin: 10,
+      headwaySamples: 500,
+      headwayIsLap: false,
+      latenessSamples: 0,
+      waitMin: 7.5,
+      waitByHour: { '8': 9 },
+    };
+
+    it('uses the measured wait, not half the headway', () => {
+      expect(waitMinutesAt(measured, 8 * 60, 15)).toBe(9);
+      expect(waitMinutesAt(measured, 14 * 60, 15)).toBe(7.5);
+    });
+
+    it('falls back to half the headway without a measured wait', () => {
+      expect(waitMinutesAt({ ...measured, waitMin: undefined, waitByHour: undefined }, 14 * 60, 15)).toBe(5);
+      expect(waitMinutesAt(undefined, 14 * 60, 15)).toBe(7.5);
+    });
+
+    it('boards after the measured wait', () => {
+      const g = withHistory(fresh(), {
+        '122': { headwayMin: 10, headwaySamples: 500, latenessSamples: 0, waitMin: 7.5 },
+      });
+      const route = g.routes.get('122')!;
+      const from = g.stops.get(route.stops[0].stopCode)!;
+      const to = g.stops.get(route.stops[3].stopCode)!;
+      const bus = planJourney(g, from, to, { departAt: NOON })
+        .flatMap((it) => it.legs)
+        .find((l): l is BusLeg => l.kind === 'bus' && l.route.code === '122' && l.boardStop.code === from.code);
+      expect(bus?.departAt).toBe(NOON + 7.5);
+    });
+  });
+
+  describe('a route that runs early', () => {
+    const early = (min: number) => ({ headwaySamples: 0, headwayIsLap: false, latenessSamples: 1000, earlyMin: min });
+
+    it('rounds and caps the margin, and asks none of a route that keeps time', () => {
+      expect(earlyBufferAt(early(6.6), NOON)).toBe(7);
+      expect(earlyBufferAt(early(20), NOON)).toBe(MAX_EARLY_BUFFER_MIN);
+      expect(earlyBufferAt(early(0), NOON)).toBe(0);
+      expect(earlyBufferAt({ ...early(6), latenessSamples: 10 }, NOON)).toBe(0);
+      expect(earlyBufferAt({ ...early(2), earlyByHour: { '12': 5 } }, NOON)).toBe(5);
+    });
+
+    // A rider who would reach the stop three minutes before a bus that is often
+    // six early is not offered it: one in four of those buses has already gone.
+    it('does not offer a bus the rider would reach too close to its time', () => {
+      const due = directR1(fresh(), NOON)!.bus.departAt;
+
+      expect(directR1(fresh(), due - 3)!.bus.departAt).toBe(due);
+      const g = withHistory(fresh(), { [R1]: early(6) });
+      expect(directR1(g, due - 3)!.bus.departAt).toBeGreaterThan(due);
+    });
+
+    it('says when to be at the stop, and leaves in time for it', () => {
+      const due = directR1(fresh(), NOON)!.bus.departAt;
+      const g = withHistory(fresh(), { [R1]: early(6) });
+      const { it, bus } = directR1(g, due - 10)!;
+
+      expect(bus.departAt).toBe(due);
+      expect(bus.boardBy).toBe(due - 6);
+      expect(it.departAt).toBe(due - 6);
+    });
+
+    it('asks nothing extra on a route that keeps time', () => {
+      const { it, bus } = directR1(withHistory(fresh(), { [R1]: early(0) }), NOON)!;
+      expect(bus.boardBy).toBeUndefined();
+      expect(it.departAt).toBe(bus.departAt);
+    });
+
+    // Standing at the stop, the next bus is the next bus: the margin was about
+    // getting there in time, and they are there.
+    it('drops the margin once the rider is waiting at the stop', () => {
+      const due = directR1(fresh(), NOON)!.bus.departAt;
+      const g = withHistory(fresh(), { [R1]: early(6) });
+      const planned = directR1(g, due - 10)!.it;
+      const busIndex = planned.legs.findIndex((l) => l.kind === 'bus');
+
+      const waiting = refreshItinerary(g, planned, { now: due - 3, fromLeg: busIndex })!;
+      const bus = waiting.legs[busIndex] as BusLeg;
+      expect(bus.departAt).toBe(due);
+      expect(bus.boardBy).toBeUndefined();
+
+      const notYetThere = refreshItinerary(g, planned, { now: due - 3 })!;
+      expect((notYetThere.legs[busIndex] as BusLeg).departAt).toBeGreaterThan(due);
+    });
+  });
+
+  describe('a route that runs late', () => {
+    it('mentions typical lateness that is worth mentioning', () => {
+      const due = directR1(fresh(), NOON)!.bus.departAt;
+      const hour = String(Math.floor(due / 60));
+      const late = (min: number) =>
+        withHistory(fresh(), { [R1]: { headwaySamples: 0, latenessSamples: 1000, latenessByHour: { [hour]: min } } });
+
+      expect(directR1(late(4.4), NOON)!.bus.typicalLateMin).toBe(4);
+      expect(directR1(late(1.5), NOON)!.bus.typicalLateMin).toBeUndefined();
+      // Surfaced, not applied: the timetable stays the claim.
+      expect(directR1(late(4.4), NOON)!.bus.departAt).toBe(due);
+    });
+
+    it('only on enough evidence', () => {
+      expect(typicalLateMinAt({ headwaySamples: 0, headwayIsLap: false, latenessSamples: 10, latenessByHour: { '12': 9 } }, NOON)).toBeUndefined();
+    });
+  });
+
+  describe('day types', () => {
+    it('reads Friday and Saturday as their own kinds of day', () => {
+      expect(dayTypeOf('2026-11-13')).toBe('fri');
+      expect(dayTypeOf('2026-11-14')).toBe('sat');
+      expect(dayTypeOf('2026-11-15')).toBe('week');
+    });
+
+    // R14 waits 8 minutes on a Friday and 76 on a Saturday.
+    it("plans on today's kind of day where enough of them were watched", () => {
+      const g = fresh();
+      g.serviceDate = '2026-11-13';
+      withHistory(
+        g,
+        {
+          '122': {
+            headwaySamples: 500,
+            latenessSamples: 0,
+            waitByHour: { '8': 5, '9': 6 },
+            activeDays: 20,
+            activeByHour: { '8': 1, '9': 1 },
+            dayTypes: { fri: { activeDays: 4, activeByHour: { '9': 1 }, waitByHour: { '8': 9 } } },
+          },
+        },
+        { days: 20, dayTypeDays: { fri: 4, week: 16 } },
+      );
+      const measured = g.routes.get('122')!.measured!;
+      expect(measured.dayType).toBe('fri');
+      expect(measured.waitByHour).toEqual({ '8': 9, '9': 6 });
+      // Seen at 09:00 on Fridays but never at 08:00.
+      expect(runsAt(measured, 9 * 60)).toBe(true);
+      expect(runsAt(measured, 8 * 60)).toBe(false);
+    });
+
+    it('keeps the pooled figures when too few such days were watched', () => {
+      const g = fresh();
+      g.serviceDate = '2026-11-13';
+      withHistory(
+        g,
+        { '122': { headwaySamples: 500, latenessSamples: 0, waitByHour: { '8': 5 }, activeDays: 20, activeByHour: { '8': 1 } } },
+        { days: 20, dayTypeDays: { fri: 2, week: 18 } },
+      );
+      const measured = g.routes.get('122')!.measured!;
+      expect(measured.dayType).toBeUndefined();
+      expect(measured.waitByHour).toEqual({ '8': 5 });
+      expect(runsAt(measured, 8 * 60)).toBe(true);
+    });
+
+    it('treats a route never seen on this kind of day as not running on it', () => {
+      const g = fresh();
+      g.serviceDate = '2026-11-13';
+      withHistory(
+        g,
+        { '122': { headwaySamples: 500, latenessSamples: 0, activeDays: 16, activeByHour: { '8': 1 }, dayTypes: {} } },
+        { days: 20, dayTypeDays: { fri: 4, week: 16 } },
+      );
+      expect(runsAt(g.routes.get('122')!.measured, 8 * 60)).toBe(false);
+    });
   });
 });

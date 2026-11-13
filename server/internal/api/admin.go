@@ -42,8 +42,15 @@ const (
 	// forever.
 	adminClockSkew   = 2 * time.Minute
 	adminNonceWindow = 5 * time.Minute
-	// adminTimeout must stay inside the http.Server's ReadTimeout.
+	// adminTimeout must stay inside the http.Server's ReadTimeout: when that
+	// expires mid-handler, net/http's background read fails and cancels the
+	// request context. Ops with their own longer timeout extend the read
+	// deadline to match; see handleAdminRPC.
 	adminTimeout = 20 * time.Second
+	// adminSlowTimeout is for the store ops, where a query over the raw fixes
+	// (millions of rows) legitimately takes longer than 20 s. Kept under the
+	// 100 s a Cloudflare Tunnel allows an origin to answer in.
+	adminSlowTimeout = 90 * time.Second
 	// adminRatePerMinute bounds the cost of unauthenticated traffic. Forging a
 	// signature is not something to brute-force; verifying one still costs CPU.
 	adminRatePerMinute = 30
@@ -76,6 +83,8 @@ type adminOp struct {
 	Summary string `json:"summary"`
 	Params  string `json:"params,omitempty"`
 	run     func(context.Context, json.RawMessage) (any, error)
+	// timeout overrides adminTimeout when set.
+	timeout time.Duration
 }
 
 // routeLister is the part of the poller that "status" wants but the live
@@ -99,11 +108,13 @@ func (s *Server) buildAdminOps() map[string]*adminOp {
 			Summary: "run a read-only query against the store",
 			Params:  `{"query": "SELECT …", "args": [], "limit": 200}`,
 			run:     s.adminSQL,
+			timeout: adminSlowTimeout,
 		},
 		"schema": {
 			Summary: "tables, indexes, row counts and page accounting",
 			Params:  `{"deep": false}`,
 			run:     s.adminSchema,
+			timeout: adminSlowTimeout,
 		},
 		"logs": {
 			Summary: "tail the in-memory log buffer",
@@ -182,7 +193,15 @@ func (s *Server) handleAdminRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), adminTimeout)
+	timeout := adminTimeout
+	if op.timeout > 0 {
+		timeout = op.timeout
+		// The request has been read in full, so nothing is lost by pushing the
+		// read deadline out — and without it the server's ReadTimeout would
+		// cancel the context long before this timeout could.
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(timeout + 5*time.Second))
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
 	result, err := op.run(ctx, envelope.Params)

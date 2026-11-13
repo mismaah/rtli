@@ -93,6 +93,17 @@ func Open(ctx context.Context, path string) (*DB, error) {
 // older definition. Anything that changes a table already in production has to
 // be spelled out here as well as there.
 func migrate(ctx context.Context, handle *sql.DB) error {
+	// day_timetable shipped without these and was never written, so there are
+	// no rows whose defaults could mislead.
+	if _, err := ensureColumn(ctx, handle, "day_timetable", "first_ms",
+		`ALTER TABLE day_timetable ADD COLUMN first_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := ensureColumn(ctx, handle, "day_timetable", "complete",
+		`ALTER TABLE day_timetable ADD COLUMN complete INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+
 	added, err := ensureColumn(ctx, handle, "headway_obs", "same_bus",
 		`ALTER TABLE headway_obs ADD COLUMN same_bus INTEGER NOT NULL DEFAULT 0`)
 	if err != nil {
@@ -265,8 +276,11 @@ func (db *DB) ActivityFor(ctx context.Context, serviceDate string) ([]Activity, 
 // PutTimetable stores the merged full-day timetable for a service date.
 //
 // Gzip'd because it is ~230 KB of highly repetitive JSON and this row is
-// rewritten every few minutes all day.
-func (db *DB) PutTimetable(ctx context.Context, serviceDate string, payload []byte) error {
+// rewritten whenever the merge learns a departure it did not have.
+//
+// firstMs is when capture of this day began and complete whether that was
+// early enough to have seen every departure; see day_timetable in schema.sql.
+func (db *DB) PutTimetable(ctx context.Context, serviceDate string, payload []byte, firstMs int64, complete bool) error {
 	var buf bytes.Buffer
 	writer := gzip.NewWriter(&buf)
 	if _, err := writer.Write(payload); err != nil {
@@ -276,10 +290,40 @@ func (db *DB) PutTimetable(ctx context.Context, serviceDate string, payload []by
 		return err
 	}
 	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO day_timetable (service_date, updated_ms, payload) VALUES (?, ?, ?)
-		ON CONFLICT (service_date) DO UPDATE SET updated_ms = excluded.updated_ms, payload = excluded.payload`,
-		serviceDate, time.Now().UnixMilli(), buf.Bytes())
+		INSERT INTO day_timetable (service_date, updated_ms, payload, first_ms, complete) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (service_date) DO UPDATE SET
+			updated_ms = excluded.updated_ms,
+			payload    = excluded.payload,
+			first_ms   = excluded.first_ms,
+			complete   = excluded.complete`,
+		serviceDate, time.Now().UnixMilli(), buf.Bytes(), firstMs, complete)
 	return err
+}
+
+// TimetableInfo describes one stored day without its payload.
+type TimetableInfo struct {
+	ServiceDate string
+	FirstMs     int64
+	Complete    bool
+}
+
+// ListTimetables returns every stored day, oldest first.
+func (db *DB) ListTimetables(ctx context.Context) ([]TimetableInfo, error) {
+	rows, err := db.sql.QueryContext(ctx,
+		`SELECT service_date, first_ms, complete FROM day_timetable ORDER BY service_date`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TimetableInfo
+	for rows.Next() {
+		var info TimetableInfo
+		if err := rows.Scan(&info.ServiceDate, &info.FirstMs, &info.Complete); err != nil {
+			return nil, err
+		}
+		out = append(out, info)
+	}
+	return out, rows.Err()
 }
 
 // GetTimetable returns the stored timetable for a service date, or nil when
@@ -313,6 +357,43 @@ func (db *DB) DeleteTimetable(ctx context.Context, serviceDate string) error {
 // MaleOffset is Malé's fixed civil offset. UTC+05:00, no DST, ever — the same
 // assumption ServiceDate and serviceDate() in src/lib/time.ts are built on.
 const MaleOffset = 5 * time.Hour
+
+// ServiceDayStartHour is when a service day opens, in Malé time. Buses run past
+// midnight, so the 00:30 arrival belongs to the day that started the previous
+// morning. rollup.ServiceDayStartHour is this same constant.
+const ServiceDayStartHour = 4
+
+// ServiceDateAt is the service date a moment belongs to: the Malé civil date,
+// rolled back a day before ServiceDayStartHour.
+func ServiceDateAt(atMs int64) string {
+	return time.UnixMilli(atMs).UTC().Add(MaleOffset - ServiceDayStartHour*time.Hour).Format("2006-01-02")
+}
+
+// Day types. Friday and Saturday are the Maldivian weekend and run visibly
+// different service — R14 averages an 8-minute wait on Fridays and 76 on
+// Saturdays — so pooling them with the working week describes no day at all.
+const (
+	DayTypeWeek     = "week"
+	DayTypeFriday   = "fri"
+	DayTypeSaturday = "sat"
+)
+
+// DayType classifies a service date ("2026-11-13"). An unparseable date is
+// treated as a working day, the most common case.
+func DayType(serviceDate string) string {
+	day, err := time.Parse("2006-01-02", serviceDate)
+	if err != nil {
+		return DayTypeWeek
+	}
+	switch day.Weekday() {
+	case time.Friday:
+		return DayTypeFriday
+	case time.Saturday:
+		return DayTypeSaturday
+	default:
+		return DayTypeWeek
+	}
+}
 
 // maleBucket returns the day-of-week (0=Sunday) and hour a moment falls in,
 // in Malé civil time. Every bucketed column in this schema uses these, so a
